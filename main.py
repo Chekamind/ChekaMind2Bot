@@ -699,12 +699,12 @@ async def main():
         except Exception as e:
             logger.exception("💥 Бот упал, перезапуск через %d сек...", RESTART_DELAY_SECONDS)
             await asyncio.sleep(RESTART_DELAY_SECONDS)
-if __name__ == "__main__":
-    # Явно создаём новый цикл — это решает проблему "no running event loop"
+            if __name__ == "__main__":
     try:
-        # Пытаемся получить, но если нет — не страшно
+        # Пытаемся получить текущий цикл
         loop = asyncio.get_event_loop()
     except RuntimeError:
+        # Если его нет — создаём новый
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
@@ -714,5 +714,6 @@ if __name__ == "__main__":
         logger.info("Bot stopped by user")
     except Exception as e:
         logger.exception("Fatal error in main loop")
+
 
 
