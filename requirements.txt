@@ -1,4 +1,2 @@
 python-telegram-bot==20.8
-aiohttp
-gspread
-oauth2client
+aiohttp==3.9.5
