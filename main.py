@@ -2,17 +2,20 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
 
+# Логирование
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger("chekamind-bot")
 
+# Настройки
 BOT_TOKEN = "7276083736:AAGgMbHlOo5ccEvuUV-KXuJ0i2LQlgqEG_I"
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"https://chekamind2bot.onrender.com{WEBHOOK_PATH}"
 PORT = 10000
 
+# Обработчики
 async def start(update: Update, context):
     keyboard = [
         [InlineKeyboardButton("Привет 👋", callback_data="hello")],
@@ -29,15 +32,21 @@ async def button(update: Update, context):
     elif query.data == "help":
         await query.edit_message_text(text="Я могу отправлять задания на осознанность и вести вас по шагам.")
 
-async def main():
+# Основная функция
+def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button))
-    await app.bot.set_webhook(WEBHOOK_URL)
-    logger.info("Webhook установлен: %s", WEBHOOK_URL)
-    await app.start_webhook(listen="0.0.0.0", port=PORT, webhook_path=WEBHOOK_PATH)
-    await app.idle()
+
+    logger.info("🚀 Устанавливаем webhook: %s", WEBHOOK_URL)
+    
+    # Для python-telegram-bot v20.3
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_path=WEBHOOK_PATH,
+        webhook_url=WEBHOOK_URL
+    )
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
