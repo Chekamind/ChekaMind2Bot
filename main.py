@@ -2,6 +2,7 @@ import os
 import logging
 import random
 import asyncio
+import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from aiohttp import web, ClientSession
@@ -20,12 +21,12 @@ YC_API_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
-SAVE_INTERVAL_SECONDS = 60           # дебаунс сохранения
-SELF_PING_INTERVAL_SECONDS = 240     # самопинг для keep-alive
-AUTO_FINISH_HOURS = 3                # авто-завершение тренировки после X часов
-AUTO_FINISH_CHECK_SECONDS = 300      # проверка каждые 5 минут
-RESTART_DELAY_SECONDS = 5            # перезапуск после ошибки
-CLEANUP_MAX_DAYS = 90                # чистка старше 90 дней
+SAVE_INTERVAL_SECONDS = 60
+SELF_PING_INTERVAL_SECONDS = 240
+AUTO_FINISH_HOURS = 3
+AUTO_FINISH_CHECK_SECONDS = 300
+RESTART_DELAY_SECONDS = 5
+CLEANUP_MAX_DAYS = 90
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -34,18 +35,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ----------------- Глобальные хранилища -----------------
-mindfulness_sessions = {}   # user_id -> [{'time': iso, 'note': str}]
-fitness_sessions = {}       # user_id -> [{'time': iso, 'note': str, 'duration_seconds': int}]
-active_fitness_sessions = {}  # user_id -> datetime (Moscow)
-user_states = {}            # user_id -> dict
-subscribed_users = set()    # user_id для ежедневных заданий
-last_save_time = None       # для дебаунса сохранения
+mindfulness_sessions = {}
+fitness_sessions = {}
+active_fitness_sessions = {}
+user_states = {}
+subscribed_users = set()
+last_save_time = None
 
 # ----------------- Клавиатуры -----------------
 MAIN_KEYBOARD = [
     [KeyboardButton("💡 Задание"), KeyboardButton("📅 Рефлексия")],
     [KeyboardButton("✨ Я осознан!")],
     [KeyboardButton("⏱ Начать тренировку"), KeyboardButton("🏁 Закончить тренировку")],
+    [KeyboardButton("🧠 Поговорить с ИИ")],
     [KeyboardButton("📊 Статистика")]
 ]
 
@@ -183,7 +185,7 @@ def cleanup_old_sessions():
         logger.info("🧹 Очищено %d старых сессий", cleaned)
         save_data()
 
-# ----------------- Веб-сервер (для Render) -----------------
+# ----------------- Веб-сервер (для keep-alive) -----------------
 async def handle_root(request):
     return web.Response(text="🧘 Mindfulness Bot is alive!")
 
@@ -195,7 +197,7 @@ async def run_webserver():
     app.add_routes([web.get("/", handle_root), web.get("/health", handle_health)])
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.getenv("PORT", 8080))
+    port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     logger.info(f"🌐 Веб-сервер запущен на порту {port}")
@@ -203,7 +205,7 @@ async def run_webserver():
 # ----------------- Самопинг -----------------
 async def self_pinger():
     await asyncio.sleep(5)
-    url = f"http://127.0.0.1:{os.getenv('PORT', 8080)}/"
+    url = f"http://127.0.0.1:{os.getenv('PORT', 10000)}/"
     logger.info("🔁 Самопинг запущен: %s каждые %d сек", url, SELF_PING_INTERVAL_SECONDS)
     async with ClientSession() as sess:
         while True:
@@ -320,7 +322,7 @@ async def daily_report(app):
         logger.info("✅ Ежедневные отчёты отправлены")
         await asyncio.sleep(60)
 
-# ----------------- Ежедневные задания на осознанность -----------------
+# ----------------- Ежедневные задания -----------------
 MINDFULNESS_TASKS = [
     "Сегодня замечай, как часто ты дышишь. Сделай 3 глубоких вдоха каждый час.",
     "Почувствуй свои стопы. Ходи босиком хотя бы 5 минут.",
@@ -359,7 +361,7 @@ async def daily_task_sender(app):
         logger.info("✅ Ежедневные задания отправлены")
         await asyncio.sleep(60)
 
-# ----------------- Команда /ai с YandexGPT -----------------
+# ----------------- YandexGPT: общение с ИИ -----------------
 async def get_ai_response(prompt: str) -> str:
     if not YC_API_KEY or not YC_FOLDER_ID:
         return "❌ ИИ не настроен. Обратитесь к разработчику."
@@ -370,8 +372,6 @@ async def get_ai_response(prompt: str) -> str:
         "Говори как друг, который понимает. Используй мягкие метафоры и эмодзи, когда уместно."
     )
 
-    prompt_text = f"{system_message}\n\nВопрос: {prompt}\nОтвет:"
-
     payload = {
         "modelUri": f"gpt://{YC_FOLDER_ID}/yandexgpt-lite/latest",
         "completionOptions": {
@@ -379,7 +379,8 @@ async def get_ai_response(prompt: str) -> str:
             "maxTokens": "500"
         },
         "messages": [
-            {"role": "user", "text": prompt_text}
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": prompt}
         ]
     }
 
@@ -401,23 +402,7 @@ async def get_ai_response(prompt: str) -> str:
         logger.error("YandexGPT request failed: %s", e)
         return "🧠 Извини, произошла ошибка при общении с ИИ."
 
-async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    query = " ".join(context.args).strip()
-    if not query:
-        await update.message.reply_text(
-            "💭 Напиши после команды вопрос, например:\n"
-            "`/ai Как быть спокойнее в стрессе?`\n\n"
-            "Я отвечу с позиции осознанности и заботы о себе.",
-            parse_mode="Markdown"
-        )
-        return
-
-    await update.message.reply_text("🧠 Думаю...")
-    response = await get_ai_response(query)
-    await update.message.reply_text(response)
-
-# ----------------- Команды -----------------
+# ----------------- Команды и обработка сообщений -----------------
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_states.pop(user_id, None)
@@ -437,88 +422,21 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_keyboard()
         )
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_states[user_id] = {"menu": "stat_category"}
-    await update.message.reply_text("Выберите категорию статистики:", reply_markup=stat_category_keyboard())
-
-async def active_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id in active_fitness_sessions:
-        start_time = active_fitness_sessions[user_id]
-        duration = now_moscow() - start_time
-        await update.message.reply_text(
-            f"🏋️‍♂️ Тренировка запущена с {start_time.strftime('%H:%M')}\n"
-            f"⏱ Длительность: {str(duration).split('.')[0]}"
-        )
-    else:
-        await update.message.reply_text("Нет активной тренировки.")
-
-async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id in subscribed_users:
-        await update.message.reply_text("✅ Вы уже подписаны на ежедневные задания.")
-    else:
-        subscribed_users.add(user_id)
-        await update.message.reply_text(
-            "✅ Подписка активирована!\n"
-            "Каждый день в 10:00 по Москве вы будете получать задание на осознанность 🌱"
-        )
-
-async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id in subscribed_users:
-        subscribed_users.remove(user_id)
-        await update.message.reply_text("❌ Подписка отменена. Больше заданий не будет.")
-    else:
-        await update.message.reply_text("Вы не были подписаны.")
-
-# ----------------- Обработка сообщений -----------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     user_id = update.effective_user.id
     state = user_states.get(user_id, {})
 
-    if state.get("awaiting_note_confirm"):
-        if text == "📝 Записать заметку":
-            user_states[user_id] = {
-                "awaiting_note": True,
-                "session_type": state["session_type"],
-                "session_time": state["session_time"],
-                "duration": state.get("duration")
-            }
-            await update.message.reply_text(
-                "Напишите заметку:",
-                reply_markup=note_input_keyboard()
-            )
-            return
-        elif text == "❌ Отменить":
+    # Обработка вопроса к ИИ
+    if state.get("awaiting_ai_question"):
+        if text == "❌ Отмена":
             user_states.pop(user_id, None)
-            await update.message.reply_text("Действие отменено.", reply_markup=main_keyboard())
+            await update.message.reply_text("Общение с ИИ отменено.", reply_markup=main_keyboard())
             return
-        else:
-            await update.message.reply_text("Пожалуйста, выберите действие.", reply_markup=note_confirm_keyboard())
-            return
-
-    if state.get("awaiting_note"):
-        note = "Без заметки" if text in ["❌ Пропустить заметку", "🔄 Отменить"] else text
-
-        session_time = state["session_time"]
-        session_type = state["session_type"]
-        duration = state.get("duration")
-
-        if session_type == "fitness":
-            add_fitness_session(user_id, session_time, note, duration)
-        else:
-            add_mindfulness_session(user_id, session_time, note)
-
+        await update.message.reply_text("🧠 Думаю...")
+        response = await get_ai_response(text)
+        await update.message.reply_text(response, reply_markup=main_keyboard())
         user_states.pop(user_id, None)
-        save_data()
-
-        if note == "Без заметки":
-            await update.message.reply_text("Сессия сохранена без заметки.", reply_markup=main_keyboard())
-        else:
-            await update.message.reply_text(f"✅ Заметка сохранена: «{note}»", reply_markup=main_keyboard())
         return
 
     # Основные кнопки
@@ -591,6 +509,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if text == "🧠 Поговорить с ИИ":
+        user_states[user_id] = {"awaiting_ai_question": True}
+        await update.message.reply_text(
+            "💭 Напиши, что тебя волнует. Я постараюсь помочь с позиции осознанности.\n"
+            "Например: «Как справиться с тревогой?»",
+            reply_markup=ReplyKeyboardMarkup(
+                [[KeyboardButton("❌ Отмена")]],
+                resize_keyboard=True,
+                one_time_keyboard=True
+            )
+        )
+        return
+
     if text == "📊 Статистика":
         user_states[user_id] = {"menu": "stat_category"}
         await update.message.reply_text("Выберите категорию статистики:", reply_markup=stat_category_keyboard())
@@ -599,6 +530,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "🔙 Назад":
         user_states.pop(user_id, None)
         await update.message.reply_text("Вернулись в главное меню.", reply_markup=main_keyboard())
+        return
+
+    # Обработка подтверждения заметки
+    if state.get("awaiting_note_confirm"):
+        if text == "📝 Записать заметку":
+            user_states[user_id] = {
+                "awaiting_note": True,
+                "session_type": state["session_type"],
+                "session_time": state["session_time"],
+                "duration": state.get("duration")
+            }
+            await update.message.reply_text(
+                "Напишите заметку:",
+                reply_markup=note_input_keyboard()
+            )
+            return
+        elif text == "❌ Отменить":
+            user_states.pop(user_id, None)
+            await update.message.reply_text("Действие отменено.", reply_markup=main_keyboard())
+            return
+        else:
+            await update.message.reply_text("Пожалуйста, выберите действие.", reply_markup=note_confirm_keyboard())
+            return
+
+    # Обработка ввода заметки
+    if state.get("awaiting_note"):
+        note = "Без заметки" if text in ["❌ Пропустить заметку", "🔄 Отменить"] else text
+        session_time = state["session_time"]
+        session_type = state["session_type"]
+        duration = state.get("duration")
+
+        if session_type == "fitness":
+            add_fitness_session(user_id, session_time, note, duration)
+        else:
+            add_mindfulness_session(user_id, session_time, note)
+
+        user_states.pop(user_id, None)
+        save_data()
+
+        if note == "Без заметки":
+            await update.message.reply_text("Сессия сохранена без заметки.", reply_markup=main_keyboard())
+        else:
+            await update.message.reply_text(f"✅ Заметка сохранена: «{note}»", reply_markup=main_keyboard())
         return
 
     # Обработка выбора статистики
@@ -667,11 +641,6 @@ async def run_bot():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_handler))
-    app.add_handler(CommandHandler("stats", stats_command))
-    app.add_handler(CommandHandler("active", active_command))
-    app.add_handler(CommandHandler("subscribe", subscribe_command))
-    app.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
-    app.add_handler(CommandHandler("ai", ai_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     await app.initialize()
@@ -691,36 +660,6 @@ async def run_bot():
     logger.info("🚀 Бот запущен и работает")
 
     await asyncio.Event().wait()
-async def run_bot():
-    load_data()
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start_handler))
-    app.add_handler(CommandHandler("stats", stats_command))
-    app.add_handler(CommandHandler("active", active_command))
-    app.add_handler(CommandHandler("subscribe", subscribe_command))
-    app.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
-    app.add_handler(CommandHandler("ai", ai_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    await app.initialize()
-    await app.start()
-
-    # Фоновые задачи
-    app.create_task(run_webserver())
-    app.create_task(self_pinger())
-    app.create_task(fitness_auto_finish_checker(app))
-    app.create_task(fitness_reminder_checker(app))
-    app.create_task(daily_cleanup())
-    app.create_task(periodic_save())
-    app.create_task(daily_report(app))
-    app.create_task(daily_task_sender(app))
-
-    await app.updater.start_polling()
-    logger.info("🚀 Бот запущен и работает")
-
-    await asyncio.Event().wait()
-
 
 async def main():
     while True:
@@ -730,13 +669,10 @@ async def main():
             logger.exception("💥 Бот упал, перезапуск через %d сек...", RESTART_DELAY_SECONDS)
             await asyncio.sleep(RESTART_DELAY_SECONDS)
 
-
 if __name__ == "__main__":
     try:
-        # Пытаемся получить текущий цикл
         loop = asyncio.get_event_loop()
     except RuntimeError:
-        # Если его нет — создаём новый
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
@@ -746,6 +682,3 @@ if __name__ == "__main__":
         logger.info("Bot stopped by user")
     except Exception as e:
         logger.exception("Fatal error in main loop")
-
-
-
