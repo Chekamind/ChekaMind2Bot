@@ -11,9 +11,18 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 
 # ----------------- Настройки -----------------
 DATA_FILE = "/var/data/data.json"
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise SystemExit("ERROR: Установите переменную окружения BOT_TOKEN")
+
+# Внешний HTTPS-адрес, на который Telegram будет слать апдейты
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # например: https://your-app.onrender.com
+if not WEBHOOK_URL:
+    raise SystemExit("ERROR: Установите переменную окружения WEBHOOK_URL (ваш публичный HTTPS URL)")
+
+# Доп. защита: путь вебхука включает токен (можете заменить на свой секрет)
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 
 YC_API_KEY = os.getenv("YC_API_KEY")
 YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
@@ -71,14 +80,19 @@ NOTE_INPUT_KEYBOARD = [
 ]
 
 # ----------------- Вспомогательные функции -----------------
+def ensure_data_dir():
+    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+
 def now_moscow() -> datetime:
     return datetime.now(MOSCOW_TZ)
 
 def dt_to_iso(dt: datetime) -> str:
-    return dt.isoformat()
+    return dt.astimezone(MOSCOW_TZ).isoformat()
 
 def iso_to_dt(iso: str) -> datetime:
-    return datetime.fromisoformat(iso)
+    # допускаем отсутствие tzinfo в старых данных
+    dt = datetime.fromisoformat(iso)
+    return dt if dt.tzinfo else dt.replace(tzinfo=MOSCOW_TZ)
 
 def format_duration_from_seconds(seconds: int) -> str:
     td = timedelta(seconds=seconds)
@@ -111,6 +125,7 @@ def note_input_keyboard():
 # ----------------- Работа с данными -----------------
 def load_data():
     global mindfulness_sessions, fitness_sessions, last_save_time
+    ensure_data_dir()
     if not os.path.exists(DATA_FILE):
         mindfulness_sessions = {}
         fitness_sessions = {}
@@ -129,12 +144,13 @@ def load_data():
         fitness_sessions = {}
         last_save_time = now_moscow()
 
-def save_data():
+def save_data(force: bool = False):
     global last_save_time
     now = now_moscow()
-    if last_save_time and (now - last_save_time).total_seconds() < SAVE_INTERVAL_SECONDS:
+    if not force and last_save_time and (now - last_save_time).total_seconds() < SAVE_INTERVAL_SECONDS:
         return
     try:
+        ensure_data_dir()
         data = {
             "mindfulness_sessions": {str(k): v for k, v in mindfulness_sessions.items()},
             "fitness_sessions": {str(k): v for k, v in fitness_sessions.items()}
@@ -147,6 +163,11 @@ def save_data():
         logger.info("💾 Данные сохранены в %s", DATA_FILE)
     except Exception as e:
         logger.error("❌ Ошибка сохранения данных: %s", e)
+
+async def periodic_save():
+    while True:
+        await asyncio.sleep(SAVE_INTERVAL_SECONDS)
+        save_data()
 
 def add_mindfulness_session(user_id: int, time_dt: datetime, note: str):
     entry = {"time": dt_to_iso(time_dt), "note": note}
@@ -183,24 +204,43 @@ def cleanup_old_sessions():
 
     if cleaned:
         logger.info("🧹 Очищено %d старых сессий", cleaned)
-        save_data()
+        save_data(force=True)
 
-# ----------------- Веб-сервер (для keep-alive) -----------------
+# ----------------- Веб-сервер (root/health + вебхук) -----------------
 async def handle_root(request):
     return web.Response(text="🧘 Mindfulness Bot is alive!")
 
 async def handle_health(request):
     return web.Response(text="OK", status=200)
 
-async def run_webserver():
-    app = web.Application()
-    app.add_routes([web.get("/", handle_root), web.get("/health", handle_health)])
-    runner = web.AppRunner(app)
+def make_webhook_handler(app):
+    async def handle_webhook(request):
+        try:
+            data = await request.json()
+        except Exception:
+            return web.Response(status=400, text="Bad Request")
+        try:
+            update = Update.de_json(data, app.bot)
+            await app.process_update(update)
+        except Exception as e:
+            logger.exception("Failed to process update: %s", e)
+            return web.Response(status=500, text="Internal Error")
+        return web.Response(text="OK")
+    return handle_webhook
+
+async def run_webserver(app):
+    aio = web.Application()
+    aio.add_routes([
+        web.get("/", handle_root),
+        web.get("/health", handle_health),
+        web.post(WEBHOOK_PATH, make_webhook_handler(app))
+    ])
+    runner = web.AppRunner(aio)
     await runner.setup()
     port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logger.info(f"🌐 Веб-сервер запущен на порту {port}")
+    logger.info(f"🌐 Веб-сервер запущен на порту {port}, webhook path: {WEBHOOK_PATH}")
 
 # ----------------- Самопинг -----------------
 async def self_pinger():
@@ -244,7 +284,7 @@ async def fitness_reminder_checker(app):
         now = now_moscow()
         for user_id, start_time in active_fitness_sessions.items():
             duration = now - start_time
-            if timedelta(hours=2) <= duration < timedelta(hours=2.1) and user_id not in notified:
+            if timedelta(hours=2) <= duration < timedelta(hours=2, minutes=6) and user_id not in notified:
                 try:
                     await app.bot.send_message(
                         chat_id=user_id,
@@ -253,9 +293,7 @@ async def fitness_reminder_checker(app):
                     notified.add(user_id)
                 except Exception as e:
                     logger.error("❌ Ошибка напоминания: %s", e)
-            elif duration >= timedelta(hours=AUTO_FINISH_HOURS):
-                notified.discard(user_id)
-            elif duration < timedelta(hours=2):
+            elif duration >= timedelta(hours=AUTO_FINISH_HOURS) or duration < timedelta(hours=2):
                 notified.discard(user_id)
         await asyncio.sleep(300)
 
@@ -266,8 +304,7 @@ async def daily_cleanup():
         next_run = now.replace(hour=3, minute=0, second=0, microsecond=0)
         if now >= next_run:
             next_run += timedelta(days=1)
-        wait_seconds = (next_run - now).total_seconds()
-        await asyncio.sleep(wait_seconds)
+        await asyncio.sleep((next_run - now).total_seconds())
         cleanup_old_sessions()
         logger.info("✅ Ежедневная очистка завершена")
 
@@ -278,8 +315,7 @@ async def daily_report(app):
         next_report = now.replace(hour=23, minute=0, second=0, microsecond=0)
         if now >= next_report:
             next_report += timedelta(days=1)
-        wait_seconds = (next_report - now).total_seconds()
-        await asyncio.sleep(wait_seconds)
+        await asyncio.sleep((next_report - now).total_seconds())
 
         today_start = now_moscow().replace(hour=0, minute=0, second=0, microsecond=0)
         tomorrow_start = today_start + timedelta(days=1)
@@ -342,11 +378,10 @@ async def daily_task_sender(app):
         next_send = now.replace(hour=10, minute=0, second=0, microsecond=0)
         if now >= next_send:
             next_send += timedelta(days=1)
-        wait_seconds = (next_send - now).total_seconds()
-        await asyncio.sleep(wait_seconds)
+        await asyncio.sleep((next_send - now).total_seconds())
 
         task = random.choice(MINDFULNESS_TASKS)
-        for user_id in subscribed_users:
+        for user_id in list(subscribed_users):
             try:
                 await app.bot.send_message(
                     chat_id=user_id,
@@ -376,7 +411,7 @@ async def get_ai_response(prompt: str) -> str:
         "modelUri": f"gpt://{YC_FOLDER_ID}/yandexgpt-lite/latest",
         "completionOptions": {
             "temperature": 0.6,
-            "maxTokens": "500"
+            "maxTokens": 500
         },
         "messages": [
             {"role": "system", "content": system_message},
@@ -391,7 +426,7 @@ async def get_ai_response(prompt: str) -> str:
 
     try:
         async with ClientSession() as session:
-            async with session.post(YC_API_URL, json=payload, headers=headers, timeout=10) as resp:
+            async with session.post(YC_API_URL, json=payload, headers=headers, timeout=15) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
                     logger.error("YandexGPT error %d: %s", resp.status, error_text)
@@ -423,6 +458,8 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
     text = (update.message.text or "").strip()
     user_id = update.effective_user.id
     state = user_states.get(user_id, {})
@@ -635,37 +672,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("Пожалуйста, используйте кнопки меню.", reply_markup=main_keyboard())
 
-# ----------------- Запуск бота -----------------
+# ----------------- Запуск бота (webhook) -----------------
 async def run_bot():
     load_data()
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Хэндлеры
+    application.add_handler(CommandHandler("start", start_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    await app.initialize()
-    await app.start()
+    # Инициализация/старт бота без встроенного сервера PTB — мы поднимаем свой aiohttp
+    await application.initialize()
+    await application.start()
+
+    # Устанавливаем вебхук в Telegram (указывает на наш публичный URL + путь)
+    full_webhook_url = WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
+    await application.bot.set_webhook(url=full_webhook_url, drop_pending_updates=True)
+    logger.info(f"✅ Webhook установлен: {full_webhook_url}")
 
     # Фоновые задачи
-    app.create_task(run_webserver())
-    app.create_task(self_pinger())
-    app.create_task(fitness_auto_finish_checker(app))
-    app.create_task(fitness_reminder_checker(app))
-    app.create_task(daily_cleanup())
-    app.create_task(periodic_save())
-    app.create_task(daily_report(app))
-    app.create_task(daily_task_sender(app))
+    application.create_task(run_webserver(application))
+    application.create_task(self_pinger())
+    application.create_task(fitness_auto_finish_checker(application))
+    application.create_task(fitness_reminder_checker(application))
+    application.create_task(daily_cleanup())
+    application.create_task(periodic_save())
+    application.create_task(daily_report(application))
+    application.create_task(daily_task_sender(application))
 
-    await app.updater.start_polling()
-    logger.info("🚀 Бот запущен и работает")
-
+    # Ждём вечно
+    logger.info("🚀 Бот запущен (webhook) и работает")
     await asyncio.Event().wait()
 
 async def main():
     while True:
         try:
             await run_bot()
-        except Exception as e:
+        except Exception:
             logger.exception("💥 Бот упал, перезапуск через %d сек...", RESTART_DELAY_SECONDS)
             await asyncio.sleep(RESTART_DELAY_SECONDS)
 
@@ -680,5 +723,5 @@ if __name__ == "__main__":
         loop.run_until_complete(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
-    except Exception as e:
+    except Exception:
         logger.exception("Fatal error in main loop")
