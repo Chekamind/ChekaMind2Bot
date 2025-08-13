@@ -691,6 +691,36 @@ async def run_bot():
     logger.info("🚀 Бот запущен и работает")
 
     await asyncio.Event().wait()
+async def run_bot():
+    load_data()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_handler))
+    app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("active", active_command))
+    app.add_handler(CommandHandler("subscribe", subscribe_command))
+    app.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
+    app.add_handler(CommandHandler("ai", ai_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    await app.initialize()
+    await app.start()
+
+    # Фоновые задачи
+    app.create_task(run_webserver())
+    app.create_task(self_pinger())
+    app.create_task(fitness_auto_finish_checker(app))
+    app.create_task(fitness_reminder_checker(app))
+    app.create_task(daily_cleanup())
+    app.create_task(periodic_save())
+    app.create_task(daily_report(app))
+    app.create_task(daily_task_sender(app))
+
+    await app.updater.start_polling()
+    logger.info("🚀 Бот запущен и работает")
+
+    await asyncio.Event().wait()
+
 
 async def main():
     while True:
@@ -699,7 +729,9 @@ async def main():
         except Exception as e:
             logger.exception("💥 Бот упал, перезапуск через %d сек...", RESTART_DELAY_SECONDS)
             await asyncio.sleep(RESTART_DELAY_SECONDS)
-            if __name__ == "__main__":
+
+
+if __name__ == "__main__":
     try:
         # Пытаемся получить текущий цикл
         loop = asyncio.get_event_loop()
