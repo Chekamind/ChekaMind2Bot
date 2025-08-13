@@ -3,10 +3,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
 
 # Логирование
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("chekamind-bot")
 
 # Настройки
@@ -15,12 +12,9 @@ WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"https://chekamind2bot.onrender.com{WEBHOOK_PATH}"
 PORT = 10000
 
-# Обработчики
+# Обработчики команд и кнопок
 async def start(update: Update, context):
-    keyboard = [
-        [InlineKeyboardButton("Привет 👋", callback_data="hello")],
-        [InlineKeyboardButton("Помощь ❓", callback_data="help")]
-    ]
+    keyboard = [[InlineKeyboardButton("Привет 👋", callback_data="hello")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Привет! Я ваш ChekaMind Бот.", reply_markup=reply_markup)
 
@@ -28,9 +22,7 @@ async def button(update: Update, context):
     query = update.callback_query
     await query.answer()
     if query.data == "hello":
-        await query.edit_message_text(text="Рад вас видеть! 😊")
-    elif query.data == "help":
-        await query.edit_message_text(text="Я могу отправлять задания на осознанность и вести вас по шагам.")
+        await query.edit_message_text("Рад вас видеть! 😊")
 
 # Основная функция
 def main():
@@ -38,9 +30,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button))
 
-    logger.info("🚀 Устанавливаем webhook: %s", WEBHOOK_URL)
-    
-    # Для python-telegram-bot v20.3
+    logger.info("🚀 Запуск webhook...")
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
