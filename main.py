@@ -4,245 +4,215 @@ import random
 import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from aiohttp import web, ClientSession
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from aiohttp import ClientSession
 
-# ==================== КОНФИГУРАЦИЯ ====================
+# ----------------- Настройки -----------------
 BOT_TOKEN = "7276083736:AAGgMbHlOo5ccEvuUV-KXuJ0i2LQlgqEG_I"
-YC_API_KEY = "YCMvITcnXbFMtzgZbkrm-kd8KFW-0uZr3wd-1Bii"
-YC_FOLDER_ID = "blg8phjv3u31mg7urlac"
-PORT = 10000
 
-MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+YC_API_KEY = os.getenv("YC_API_KEY")
+YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
 YC_API_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 
-# ==================== НАСТРОЙКИ ====================
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+
 AUTO_FINISH_HOURS = 3
 AUTO_FINISH_CHECK_SECONDS = 300
-CLEANUP_MAX_DAYS = 90
-DAILY_TASK_HOUR = 10
-DAILY_REPORT_HOUR = 23
+RESTART_DELAY_SECONDS = 5
 
-# ==================== ИНИЦИАЛИЗАЦИЯ ====================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ==================== ХРАНИЛИЩА ДАННЫХ ====================
-mindfulness_sessions = {}
-fitness_sessions = {}
-active_fitness_sessions = {}
-user_states = {}
-subscribed_users = set()
+# ----------------- Глобальные хранилища (в памяти) -----------------
+mindfulness_sessions = {}   # user_id -> [{'time': dt, 'note': str}]
+fitness_sessions = {}       # user_id -> [{'time': dt, 'note': str, 'duration_seconds': int}]
+active_fitness_sessions = {}  # user_id -> datetime (Moscow)
+user_states = {}            # user_id -> dict
 
-# ==================== КЛАВИАТУРЫ ====================
-def get_main_keyboard():
-    buttons = [
-        [KeyboardButton("💡 Задание"), KeyboardButton("📅 Рефлексия")],
-        [KeyboardButton("✨ Я осознан!")],
-        [KeyboardButton("⏱ Начать тренировку"), KeyboardButton("🏁 Закончить тренировку")],
-        [KeyboardButton("🧠 Поговорить с ИИ"), KeyboardButton("📊 Статистика")]
-    ]
-    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
+# ----------------- Клавиатуры -----------------
+MAIN_KEYBOARD = [
+    [KeyboardButton("💡 Задание"), KeyboardButton("📅 Рефлексия")],
+    [KeyboardButton("✨ Я осознан!")],
+    [KeyboardButton("⏱ Начать тренировку"), KeyboardButton("🏁 Закончить тренировку")],
+    [KeyboardButton("🧠 Поговорить с ИИ")],
+    [KeyboardButton("📊 Статистика")]
+]
 
-def get_stat_keyboard():
-    buttons = [
-        [KeyboardButton("📊 За сегодня"), KeyboardButton("📈 За неделю")],
-        [KeyboardButton("🔙 Назад")]
-    ]
-    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
+STAT_CATEGORY_KEYBOARD = [
+    [KeyboardButton("📊 Статистика по осознанности")],
+    [KeyboardButton("📊 Статистика по спорту")],
+    [KeyboardButton("🔙 Назад")]
+]
 
-# ==================== СЛУЖЕБНЫЕ ФУНКЦИИ ====================
+STAT_PERIOD_KEYBOARD = [
+    [KeyboardButton("📅 За день"), KeyboardButton("📆 За неделю")],
+    [KeyboardButton("🔙 Назад")]
+]
+
+NOTE_CONFIRM_KEYBOARD = [
+    [KeyboardButton("📝 Записать заметку"), KeyboardButton("❌ Отменить")]
+]
+
+NOTE_INPUT_KEYBOARD = [
+    [KeyboardButton("❌ Пропустить заметку"), KeyboardButton("🔄 Отменить")]
+]
+
+# ----------------- Вспомогательные функции -----------------
 def now_moscow() -> datetime:
     return datetime.now(MOSCOW_TZ)
 
-def format_duration(seconds: int) -> str:
-    hours, remainder = divmod(seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    if hours > 0:
-        return f"{hours}ч {minutes}м {seconds}с"
-    elif minutes > 0:
-        return f"{minutes}м {seconds}с"
-    return f"{seconds}с"
+def format_duration_from_seconds(seconds: int) -> str:
+    td = timedelta(seconds=seconds)
+    total_seconds = int(td.total_seconds())
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    secs = total_seconds % 60
+    if hours:
+        return f"{hours}ч {minutes}м {secs}с"
+    if minutes:
+        return f"{minutes}м {secs}с"
+    return f"{secs}с"
 
-def cleanup_old_data():
-    cutoff = now_moscow() - timedelta(days=CLEANUP_MAX_DAYS)
-    
-    for user_id in list(mindfulness_sessions.keys()):
-        mindfulness_sessions[user_id] = [t for t in mindfulness_sessions[user_id] if t > cutoff]
-        if not mindfulness_sessions[user_id]:
-            del mindfulness_sessions[user_id]
-    
-    for user_id in list(fitness_sessions.keys()):
-        fitness_sessions[user_id] = [s for s in fitness_sessions[user_id] if s['start'] > cutoff]
-        if not fitness_sessions[user_id]:
-            del fitness_sessions[user_id]
+# ----------------- Клавиатуры как функции -----------------
+def main_keyboard():
+    return ReplyKeyboardMarkup(MAIN_KEYBOARD, resize_keyboard=True)
 
-# ==================== ОБРАБОТЧИКИ КОМАНД ====================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    subscribed_users.add(user.id)
-    await update.message.reply_text(
-        f"Привет, {user.first_name}! Я твой помощник для осознанности и тренировок.",
-        reply_markup=get_main_keyboard()
-    )
+def stat_category_keyboard():
+    return ReplyKeyboardMarkup(STAT_CATEGORY_KEYBOARD, resize_keyboard=True, one_time_keyboard=True)
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    user_id = update.effective_user.id
-    current_state = user_states.get(user_id, {})
+def stat_period_keyboard():
+    return ReplyKeyboardMarkup(STAT_PERIOD_KEYBOARD, resize_keyboard=True, one_time_keyboard=True)
 
-    # Обработка состояний
-    if current_state.get('awaiting_note'):
-        if text == "❌ Пропустить заметку":
-            note = "Без заметки"
-        else:
-            note = text
-        
-        if current_state['note_type'] == 'mindfulness':
-            mindfulness_sessions.setdefault(user_id, []).append({
-                "time": now_moscow(),
-                "note": note
+def note_confirm_keyboard():
+    return ReplyKeyboardMarkup(NOTE_CONFIRM_KEYBOARD, resize_keyboard=True)
+
+def note_input_keyboard():
+    return ReplyKeyboardMarkup(NOTE_INPUT_KEYBOARD, resize_keyboard=True, one_time_keyboard=True)
+
+# ----------------- Веб-сервер (для keep-alive) -----------------
+async def handle_root(request):
+    return web.Response(text="🧘 Mindfulness Bot is alive!")
+
+async def handle_health(request):
+    return web.Response(text="OK", status=200)
+
+async def run_webserver():
+    app = web.Application()
+    app.add_routes([web.get("/", handle_root), web.get("/health", handle_health)])
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"🌐 Веб-сервер запущен на порту {port}")
+
+# ----------------- Самопинг (для keep-alive) -----------------
+async def self_pinger():
+    await asyncio.sleep(5)
+    url = f"http://127.0.0.1:{os.getenv('PORT', 10000)}/"
+    logger.info("🔁 Самопинг запущен: %s каждые 240 сек", url)
+    async with ClientSession() as sess:
+        while True:
+            try:
+                async with sess.get(url, timeout=10) as resp:
+                    logger.debug("Ping: %d", resp.status)
+            except Exception as e:
+                logger.warning("Ping failed: %s", e)
+            await asyncio.sleep(240)
+
+# ----------------- Авто-завершение тренировок -----------------
+async def fitness_auto_finish_checker(app):
+    while True:
+        now = now_moscow()
+        to_finish = []
+        for user_id, start_time in list(active_fitness_sessions.items()):
+            duration = now - start_time
+            if duration > timedelta(hours=AUTO_FINISH_HOURS):
+                to_finish.append((user_id, start_time, duration))
+        for user_id, start_time, duration in to_finish:
+            del active_fitness_sessions[user_id]
+            if user_id not in fitness_sessions:
+                fitness_sessions[user_id] = []
+            fitness_sessions[user_id].append({
+                "time": start_time,
+                "note": "Авто-завершение (превышено время)",
+                "duration_seconds": int(duration.total_seconds())
             })
-            await update.message.reply_text("Сессия осознанности сохранена!", reply_markup=get_main_keyboard())
-        
-        elif current_state['note_type'] == 'fitness':
-            if user_id in active_fitness_sessions:
-                start_time = active_fitness_sessions.pop(user_id)
-                duration = (now_moscow() - start_time).total_seconds()
-                fitness_sessions.setdefault(user_id, []).append({
-                    "start": start_time,
-                    "duration": duration,
-                    "note": note
-                })
-                await update.message.reply_text(
-                    f"Тренировка сохранена! Длительность: {format_duration(int(duration))}",
-                    reply_markup=get_main_keyboard()
+            try:
+                await app.bot.send_message(
+                    chat_id=user_id,
+                    text=f"⚠️ Ваша тренировка, начатая в {start_time.strftime('%H:%M')}, автоматически завершена после {AUTO_FINISH_HOURS} часов."
                 )
-        
-        user_states.pop(user_id, None)
-        return
+            except Exception as e:
+                logger.error("❌ Не удалось уведомить пользователя %s: %s", user_id, e)
+        await asyncio.sleep(AUTO_FINISH_CHECK_SECONDS)
 
-    if current_state.get('awaiting_ai'):
-        await update.message.reply_text("🧠 Думаю...")
-        response = await get_ai_response(text)
-        user_states.pop(user_id, None)
-        await update.message.reply_text(response, reply_markup=get_main_keyboard())
-        return
+# ----------------- Ежедневный отчёт в 23:00 (статистика за день) -----------------
+async def daily_report(app):
+    while True:
+        now = now_moscow()
+        next_report = now.replace(hour=23, minute=0, second=0, microsecond=0)
+        if now >= next_report:
+            next_report += timedelta(days=1)
+        wait_seconds = (next_report - now).total_seconds()
+        await asyncio.sleep(wait_seconds)
 
-    # Обработка основных команд
-    if text == "✨ Я осознан!":
-        user_states[user_id] = {
-            'awaiting_note': True,
-            'note_type': 'mindfulness'
-        }
-        buttons = [
-            [KeyboardButton("❌ Пропустить заметку")]
-        ]
-        await update.message.reply_text(
-            "Опишите ваше состояние (или пропустите):",
-            reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True)
-        )
-    
-    elif text == "⏱ Начать тренировку":
-        active_fitness_sessions[user_id] = now_moscow()
-        await update.message.reply_text("🏋️ Тренировка начата! Не забудьте завершить её.")
-    
-    elif text == "🏁 Закончить тренировку":
-        if user_id not in active_fitness_sessions:
-            await update.message.reply_text("У вас нет активной тренировки.")
-            return
-        
-        user_states[user_id] = {
-            'awaiting_note': True,
-            'note_type': 'fitness'
-        }
-        buttons = [
-            [KeyboardButton("❌ Пропустить заметку")]
-        ]
-        await update.message.reply_text(
-            "Опишите вашу тренировку (или пропустите):",
-            reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True)
-        )
-    
-    elif text == "🧠 Поговорить с ИИ":
-        user_states[user_id] = {'awaiting_ai': True}
-        await update.message.reply_text("Напишите ваш вопрос ИИ:")
-    
-    elif text == "📊 Статистика":
-        await show_statistics(update)
-    
-    elif text == "📊 За сегодня":
-        await show_daily_stats(update)
-    
-    elif text == "📈 За неделю":
-        await show_weekly_stats(update)
-    
-    elif text == "🔙 Назад":
-        await update.message.reply_text("Главное меню:", reply_markup=get_main_keyboard())
-    
-    else:
-        await update.message.reply_text("Пожалуйста, используйте кнопки меню", reply_markup=get_main_keyboard())
+        today_start = now_moscow().replace(hour=0, minute=0, second=0, microsecond=0)
+        tomorrow_start = today_start + timedelta(days=1)
 
-# ==================== ФУНКЦИИ СТАТИСТИКИ ====================
-async def show_statistics(update: Update):
-    await update.message.reply_text(
-        "Выберите тип статистики:",
-        reply_markup=get_stat_keyboard()
-    )
+        for user_id in list(mindfulness_sessions.keys()):
+            mindful_today = [
+                s for s in mindfulness_sessions.get(user_id, [])
+                if s["time"] >= today_start and s["time"] < tomorrow_start
+            ]
 
-async def show_daily_stats(update: Update):
-    user_id = update.effective_user.id
-    today = now_moscow().date()
-    
-    mindful_count = len([s for s in mindfulness_sessions.get(user_id, []) 
-                      if s['time'].date() == today])
-    
-    fitness_sessions_today = [s for s in fitness_sessions.get(user_id, []) 
-                            if s['start'].date() == today]
-    total_duration = sum(s['duration'] for s in fitness_sessions_today)
-    
-    await update.message.reply_text(
-        f"📊 Статистика за сегодня:\n\n"
-        f"✨ Сессий осознанности: {mindful_count}\n"
-        f"🏋️‍♂️ Тренировок: {len(fitness_sessions_today)}\n"
-        f"⏱ Общее время тренировок: {format_duration(int(total_duration))}",
-        reply_markup=get_stat_keyboard()
-    )
+            fitness_today = [
+                s for s in fitness_sessions.get(user_id, [])
+                if s["time"] >= today_start and s["time"] < tomorrow_start
+            ]
 
-async def show_weekly_stats(update: Update):
-    user_id = update.effective_user.id
-    week_ago = now_moscow() - timedelta(days=7)
-    
-    mindful_count = len([s for s in mindfulness_sessions.get(user_id, []) 
-                      if s['time'] >= week_ago])
-    
-    fitness_sessions_week = [s for s in fitness_sessions.get(user_id, []) 
-                           if s['start'] >= week_ago]
-    total_duration = sum(s['duration'] for s in fitness_sessions_week)
-    
-    await update.message.reply_text(
-        f"📈 Статистика за неделю:\n\n"
-        f"✨ Сессий осознанности: {mindful_count}\n"
-        f"🏋️‍♂️ Тренировок: {len(fitness_sessions_week)}\n"
-        f"⏱ Общее время тренировок: {format_duration(int(total_duration))}",
-        reply_markup=get_stat_keyboard()
-    )
+            total_duration = sum(s.get("duration_seconds", 0) for s in fitness_today)
+            duration_str = format_duration_from_seconds(total_duration) if total_duration else "0с"
 
-# ==================== YANDEX GPT ====================
+            if not mindful_today and not fitness_today:
+                continue
+
+            report = (
+                "🌙 *Ежедневный отчёт*\n\n"
+                f"📅 *Сегодня вы:* \n"
+                f"✨ Отмечали осознанность: {len(mindful_today)} раз\n"
+                f"🏋️‍♂️ Провели тренировок: {len(fitness_today)}\n"
+                f"⏱ Общая длительность тренировок: {duration_str}\n\n"
+                "Молодец! Завтра — ещё лучше 💪"
+            )
+
+            try:
+                await app.bot.send_message(
+                    chat_id=user_id,
+                    text=report,
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.error("❌ Не удалось отправить отчёт пользователю %s: %s", user_id, e)
+
+        logger.info("✅ Ежедневные отчёты отправлены")
+        await asyncio.sleep(60)
+
+# ----------------- YandexGPT: общение с ИИ -----------------
 async def get_ai_response(prompt: str) -> str:
     if not YC_API_KEY or not YC_FOLDER_ID:
-        return "ИИ-модуль не настроен"
-    
-    system_prompt = (
-        "Ты - дружелюбный помощник по осознанности и здоровому образу жизни. "
-        "Отвечай кратко (1-3 предложения), поддерживающе, с эмодзи где уместно. "
-        "Избегай сложных терминов, говори как друг."
+        return "❌ ИИ не настроен. Обратитесь к разработчику."
+
+    system_message = (
+        "Ты — тёплый и мудрый наставник по осознанности, внимательности и внутреннему росту. "
+        "Отвечай кратко (1–3 предложения), с заботой, без оценок. "
+        "Говори как друг, который понимает. Используй мягкие метафоры и эмодзи, когда уместно."
     )
-    
+
     payload = {
         "modelUri": f"gpt://{YC_FOLDER_ID}/yandexgpt-lite/latest",
         "completionOptions": {
@@ -250,122 +220,313 @@ async def get_ai_response(prompt: str) -> str:
             "maxTokens": 500
         },
         "messages": [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": system_message},
             {"role": "user", "content": prompt}
         ]
     }
-    
+
     headers = {
         "Authorization": f"Api-Key {YC_API_KEY}",
         "Content-Type": "application/json"
     }
-    
+
     try:
         async with ClientSession() as session:
             async with session.post(YC_API_URL, json=payload, headers=headers, timeout=15) as resp:
                 if resp.status != 200:
-                    return "😕 Не удалось получить ответ от ИИ"
+                    error_text = await resp.text()
+                    logger.error("YandexGPT error %d: %s", resp.status, error_text)
+                    return "🧠 Извини, не могу подключиться к ИИ. Попробуй позже."
                 data = await resp.json()
                 return data["result"]["alternatives"][0]["message"]["content"].strip()
     except Exception as e:
-        logger.error(f"Ошибка YandexGPT: {e}")
-        return "⚠️ Произошла ошибка при запросе к ИИ"
+        logger.error("YandexGPT request failed: %s", e)
+        return "🧠 Извини, произошла ошибка при общении с ИИ."
 
-# ==================== ФОНОВЫЕ ЗАДАЧИ ====================
-async def daily_tasks(app):
+# ----------------- Команды и обработка сообщений -----------------
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_states.pop(user_id, None)
+
+    if user_id in active_fitness_sessions:
+        start_time = active_fitness_sessions[user_id]
+        await update.message.reply_text(
+            f"⚠️ У вас уже запущена тренировка с {start_time.strftime('%H:%M')}!\n"
+            "Не забудьте завершить её кнопкой «🏁 Закончить тренировку».\n\n"
+            "Привет! Давай развиваться вместе 🌱",
+            reply_markup=main_keyboard()
+        )
+    else:
+        await update.message.reply_text(
+            "Привет! Давай развиваться вместе 🌱\n"
+            "Используй кнопки ниже, чтобы отмечать осознанность, тренировки и смотреть прогресс.",
+            reply_markup=main_keyboard()
+        )
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
+    text = (update.message.text or "").strip()
+    user_id = update.effective_user.id
+    state = user_states.get(user_id, {})
+
+    # Обработка вопроса к ИИ
+    if state.get("awaiting_ai_question"):
+        if text == "❌ Отмена":
+            user_states.pop(user_id, None)
+            await update.message.reply_text("Общение с ИИ отменено.", reply_markup=main_keyboard())
+            return
+        await update.message.reply_text("🧠 Думаю...")
+        response = await get_ai_response(text)
+        await update.message.reply_text(response, reply_markup=main_keyboard())
+        user_states.pop(user_id, None)
+        return
+
+    # Основные кнопки
+    if text == "💡 Задание":
+        await update.message.reply_text(random.choice([
+            "Задача: остановись на 60 секунд и почувствуй тело.",
+            "Задача: сделай 10 глубоких вдохов.",
+            "Задача: послушай звуки вокруг тебя.",
+        ]))
+        return
+
+    if text == "📅 Рефлексия":
+        await update.message.reply_text(random.choice([
+            "Рефлексия: что ты заметил сегодня?",
+            "Рефлексия: чего ты добился на этой неделе?",
+        ]))
+        return
+
+    if text == "✨ Я осознан!":
+        now = now_moscow()
+        if user_id not in mindfulness_sessions:
+            mindfulness_sessions[user_id] = []
+        user_states[user_id] = {
+            "awaiting_note_confirm": True,
+            "session_type": "mindfulness",
+            "session_time": now,
+            "duration": None
+        }
+        await update.message.reply_text("Хотите записать заметку об осознанности?", reply_markup=note_confirm_keyboard())
+        return
+
+    if text == "⏱ Начать тренировку":
+        if user_id in active_fitness_sessions:
+            await update.message.reply_text("Тренировка уже запущена! Сначала завершите текущую.", reply_markup=main_keyboard())
+            return
+        start_time = now_moscow()
+        active_fitness_sessions[user_id] = start_time
+        user_states[user_id] = {
+            "awaiting_note_confirm": True,
+            "session_type": "fitness",
+            "session_time": start_time,
+            "duration": None
+        }
+        await update.message.reply_text(
+            f"✅ Тренировка начата в {start_time.strftime('%H:%M')}!\n"
+            "Не забудьте нажать «🏁 Закончить тренировку», когда закончите.",
+            reply_markup=note_confirm_keyboard()
+        )
+        return
+
+    if text == "🏁 Закончить тренировку":
+        start_time = active_fitness_sessions.get(user_id)
+        if not start_time:
+            await update.message.reply_text("Тренировка не была начата.", reply_markup=main_keyboard())
+            return
+        end_time = now_moscow()
+        duration = end_time - start_time
+        del active_fitness_sessions[user_id]
+        if user_id not in fitness_sessions:
+            fitness_sessions[user_id] = []
+        user_states[user_id] = {
+            "awaiting_note_confirm": True,
+            "session_type": "fitness",
+            "session_time": start_time,
+            "duration": duration
+        }
+        await update.message.reply_text(
+            f"🎉 Тренировка завершена!\n"
+            f"⏱ Начало: {start_time.strftime('%H:%M')}\n"
+            f"⏱ Окончание: {end_time.strftime('%H:%M')}\n"
+            f"⏱ Длительность: {str(duration).split('.')[0]}\n"
+            "Хотите записать заметку?",
+            reply_markup=note_confirm_keyboard()
+        )
+        return
+
+    if text == "🧠 Поговорить с ИИ":
+        user_states[user_id] = {"awaiting_ai_question": True}
+        await update.message.reply_text(
+            "💭 Напиши, что тебя волнует. Я постараюсь помочь с позиции осознанности.\n"
+            "Например: «Как справиться с тревогой?»",
+            reply_markup=ReplyKeyboardMarkup(
+                [[KeyboardButton("❌ Отмена")]],
+                resize_keyboard=True,
+                one_time_keyboard=True
+            )
+        )
+        return
+
+    if text == "📊 Статистика":
+        user_states[user_id] = {"menu": "stat_category"}
+        await update.message.reply_text("Выберите категорию статистики:", reply_markup=stat_category_keyboard())
+        return
+
+    if text == "🔙 Назад":
+        user_states.pop(user_id, None)
+        await update.message.reply_text("Вернулись в главное меню.", reply_markup=main_keyboard())
+        return
+
+    # Обработка подтверждения заметки
+    if state.get("awaiting_note_confirm"):
+        if text == "📝 Записать заметку":
+            user_states[user_id] = {
+                "awaiting_note": True,
+                "session_type": state["session_type"],
+                "session_time": state["session_time"],
+                "duration": state.get("duration")
+            }
+            await update.message.reply_text(
+                "Напишите заметку:",
+                reply_markup=note_input_keyboard()
+            )
+            return
+        elif text == "❌ Отменить":
+            user_states.pop(user_id, None)
+            await update.message.reply_text("Действие отменено.", reply_markup=main_keyboard())
+            return
+        else:
+            await update.message.reply_text("Пожалуйста, выберите действие.", reply_markup=note_confirm_keyboard())
+            return
+
+    # Обработка ввода заметки
+    if state.get("awaiting_note"):
+        note = "Без заметки" if text in ["❌ Пропустить заметку", "🔄 Отменить"] else text
+        session_time = state["session_time"]
+        session_type = state["session_type"]
+        duration = state.get("duration")
+
+        if session_type == "fitness":
+            if user_id not in fitness_sessions:
+                fitness_sessions[user_id] = []
+            fitness_sessions[user_id].append({
+                "time": session_time,
+                "note": note,
+                "duration_seconds": int(duration.total_seconds()) if duration else None
+            })
+        else:
+            if user_id not in mindfulness_sessions:
+                mindfulness_sessions[user_id] = []
+            mindfulness_sessions[user_id].append({
+                "time": session_time,
+                "note": note
+            })
+
+        user_states.pop(user_id, None)
+        await update.message.reply_text(
+            f"✅ Заметка сохранена: «{note}»" if note != "Без заметки" else "Сессия сохранена без заметки.",
+            reply_markup=main_keyboard()
+        )
+        return
+
+    # Обработка выбора статистики
+    if state.get("menu") == "stat_category":
+        if text == "📊 Статистика по осознанности":
+            user_states[user_id] = {"menu": "stat_period", "stat_category": "mindfulness"}
+            await update.message.reply_text("Выберите период:", reply_markup=stat_period_keyboard())
+        elif text == "📊 Статистика по спорту":
+            user_states[user_id] = {"menu": "stat_period", "stat_category": "fitness"}
+            await update.message.reply_text("Выберите период:", reply_markup=stat_period_keyboard())
+        else:
+            await update.message.reply_text("Выберите из меню.", reply_markup=stat_category_keyboard())
+        return
+
+    if state.get("menu") == "stat_period":
+        now = now_moscow()
+        if text == "📅 За день":
+            period_start = now - timedelta(days=1)
+        elif text == "📆 За неделю":
+            period_start = now - timedelta(days=7)
+        elif text == "🔙 Назад":
+            user_states[user_id] = {"menu": "stat_category"}
+            await update.message.reply_text("Выберите категорию:", reply_markup=stat_category_keyboard())
+            return
+        else:
+            await update.message.reply_text("Выберите из меню.", reply_markup=stat_period_keyboard())
+            return
+
+        cat = state["stat_category"]
+        sessions = mindfulness_sessions.get(user_id, []) if cat == "mindfulness" else fitness_sessions.get(user_id, [])
+        title = "осознанности" if cat == "mindfulness" else "спорта"
+
+        filtered = [(s["time"], s) for s in sessions if s["time"] >= period_start]
+        if not filtered:
+            await update.message.reply_text(f"За выбранный период нет данных по {title}.", reply_markup=main_keyboard())
+            return
+
+        msg = (f"📊 *Статистика по {title}* за период с {period_start.strftime('%d.%m.%Y')} по {now.strftime('%d.%m.%Y')}:\n"
+               f"🔢 Всего сессий: {len(filtered)}\n\n")
+
+        for dt, s in filtered:
+            time_str = dt.strftime("%d.%m %H:%M")
+            note = s.get("note", "").strip()
+            dur = s.get("duration_seconds")
+            dur_str = f"⏱ {format_duration_from_seconds(dur)}" if dur else ""
+
+            entry = f"🔹 *{time_str}*"
+            if dur_str:
+                entry += f" | {dur_str}"
+            entry += "\n"
+            if note and note != "Без заметки":
+                entry += f"  📝 _{note}_"
+            else:
+                entry += f"  💬 _Без заметки_"
+            msg += entry + "\n\n"
+
+        user_states.pop(user_id, None)
+        await update.message.reply_text(msg, reply_markup=main_keyboard(), parse_mode="Markdown")
+        return
+
+    await update.message.reply_text("Пожалуйста, используйте кнопки меню.", reply_markup=main_keyboard())
+
+# ----------------- Запуск бота -----------------
+async def run_bot():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    await app.initialize()
+    await app.start()
+
+    # Фоновые задачи
+    app.create_task(run_webserver())
+    app.create_task(self_pinger())
+    app.create_task(fitness_auto_finish_checker(app))
+    app.create_task(daily_report(app))
+
+    # Запуск polling
+    await app.run_polling()
+
+async def main():
     while True:
         try:
-            now = now_moscow()
-            # Ежедневное задание в 10:00
-            if now.hour == DAILY_TASK_HOUR and now.minute == 0:
-                tasks = [
-                    "Сегодня попробуйте 5 минут глубокого дыхания каждый час",
-                    "Попробуйте осознанную ходьбу - замечайте каждое движение",
-                    "Во время еды сосредоточьтесь только на вкусе пищи"
-                ]
-                task = random.choice(tasks)
-                for user_id in subscribed_users:
-                    try:
-                        await app.bot.send_message(
-                            chat_id=user_id,
-                            text=f"🌞 Доброе утро! Сегодняшнее задание:\n\n{task}"
-                        )
-                    except Exception as e:
-                        logger.error(f"Ошибка отправки задания: {e}")
-            
-            # Ежедневный отчет в 23:00
-            elif now.hour == DAILY_REPORT_HOUR and now.minute == 0:
-                today_start = now.replace(hour=0, minute=0, second=0)
-                
-                for user_id in list(mindfulness_sessions.keys()):
-                    mindful_today = len([s for s in mindfulness_sessions[user_id] 
-                                      if s['time'] >= today_start])
-                    
-                    fitness_today = [s for s in fitness_sessions.get(user_id, []) 
-                                   if s['start'] >= today_start]
-                    total_duration = sum(s['duration'] for s in fitness_today)
-                    
-                    if mindful_today or fitness_today:
-                        try:
-                            await app.bot.send_message(
-                                chat_id=user_id,
-                                text=(
-                                    "🌙 Ежедневный отчет\n\n"
-                                    f"✨ Сессий осознанности: {mindful_today}\n"
-                                    f"🏋️‍♂️ Тренировок: {len(fitness_today)}\n"
-                                    f"⏱ Общее время тренировок: {format_duration(int(total_duration))}"
-                                )
-                            )
-                        except Exception as e:
-                            logger.error(f"Ошибка отправки отчета: {e}")
-            
-            # Автозавершение тренировок
-            for user_id, start_time in list(active_fitness_sessions.items()):
-                duration = now - start_time
-                if duration > timedelta(hours=AUTO_FINISH_HOURS):
-                    fitness_sessions.setdefault(user_id, []).append({
-                        "start": start_time,
-                        "duration": duration.total_seconds(),
-                        "note": "Автозавершение"
-                    })
-                    del active_fitness_sessions[user_id]
-                    try:
-                        await app.bot.send_message(
-                            chat_id=user_id,
-                            text=f"⏳ Тренировка автоматически завершена после {AUTO_FINISH_HOURS} часов"
-                        )
-                    except Exception as e:
-                        logger.error(f"Ошибка автозавершения тренировки: {e}")
-            
-            # Очистка старых данных
-            if now.hour == 3 and now.minute == 0:  # В 3:00 ночи
-                cleanup_old_data()
-            
-            await asyncio.sleep(60)
-        
+            await run_bot()
         except Exception as e:
-            logger.error(f"Ошибка в фоновых задачах: {e}")
-            await asyncio.sleep(60)
-
-# ==================== ЗАПУСК БОТА ====================
-async def main():
-    try:
-        application = ApplicationBuilder().token(BOT_TOKEN).build()
-        
-        # Регистрация обработчиков
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        
-        # Запуск фоновых задач
-        asyncio.create_task(daily_tasks(application))
-        
-        # Запуск бота
-        logger.info("🟢 Бот запускается...")
-        await application.run_polling()
-    
-    except Exception as e:
-        logger.error(f"🔴 Критическая ошибка: {e}")
-        raise
+            logger.exception("💥 Бот упал, перезапуск через %d сек...", RESTART_DELAY_SECONDS)
+            await asyncio.sleep(RESTART_DELAY_SECONDS)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.exception("Fatal error in main loop")
