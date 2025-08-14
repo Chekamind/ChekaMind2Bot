@@ -7,12 +7,16 @@ from zoneinfo import ZoneInfo
 from aiohttp import web, ClientSession
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.error import Conflict  # Добавлено для обработки конфликта
 
 # ==================== КОНФИГУРАЦИЯ ====================
-BOT_TOKEN = "7276083736:AAGgMbHlOo5ccEvuUV-KXuJ0i2LQlgqEG_I"
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # 🔐 Перенесено в переменные окружения
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN не установлен в переменных окружения")
+
 YC_API_KEY = os.getenv("YC_API_KEY")
 YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
-YC_API_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+YC_API_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"  # Убраны лишние пробелы
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
 # Настройки времени
@@ -134,7 +138,7 @@ async def get_ai_response(prompt: str) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     storage.user_states.pop(user.id, None)
-    
+
     if user.id in storage.active_fitness_sessions:
         start_time = storage.active_fitness_sessions[user.id]
         await update.message.reply_text(
@@ -162,15 +166,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if state.get("awaiting_ai"):
         await handle_ai_response(update, user_id, text)
         return
-        
+
     if state.get("awaiting_note"):
         await handle_note_input(update, user_id, text)
         return
-        
+
     if state.get("awaiting_confirmation"):
         await handle_note_confirmation(update, user_id, text)
         return
-        
+
     # Основные команды
     if text == "💡 Задание":
         await send_random_task(update)
@@ -197,7 +201,7 @@ async def handle_ai_response(update: Update, user_id: int, text: str):
         storage.user_states.pop(user_id, None)
         await update.message.reply_text("Общение с ИИ отменено.", reply_markup=main_menu())
         return
-        
+
     await update.message.reply_text("🧠 Думаю...")
     response = await get_ai_response(text)
     storage.user_states.pop(user_id, None)
@@ -206,7 +210,7 @@ async def handle_ai_response(update: Update, user_id: int, text: str):
 async def handle_note_input(update: Update, user_id: int, text: str):
     state = storage.user_states[user_id]
     note = "Без заметки" if text in ["❌ Пропустить заметку", "🔄 Отменить"] else text
-    
+
     if state["session_type"] == "mindfulness":
         storage.mindfulness_sessions.setdefault(user_id, []).append({
             "time": state["session_time"],
@@ -218,14 +222,14 @@ async def handle_note_input(update: Update, user_id: int, text: str):
             "note": note,
             "duration_seconds": int(state["duration"].total_seconds()) if state["duration"] else None
         })
-    
+
     storage.user_states.pop(user_id, None)
     message = f"✅ Заметка сохранена: «{note}»" if note != "Без заметки" else "Сессия сохранена без заметки."
     await update.message.reply_text(message, reply_markup=main_menu())
 
 async def handle_note_confirmation(update: Update, user_id: int, text: str):
     state = storage.user_states[user_id]
-    
+
     if text == "📝 Записать заметку":
         storage.user_states[user_id] = {
             "awaiting_note": True,
@@ -269,7 +273,7 @@ async def start_workout_session(update: Update, user_id: int):
     if user_id in storage.active_fitness_sessions:
         await update.message.reply_text("Тренировка уже запущена! Сначала завершите текущую.", reply_markup=main_menu())
         return
-        
+
     start_time = now_moscow()
     storage.active_fitness_sessions[user_id] = start_time
     storage.user_states[user_id] = {
@@ -288,7 +292,7 @@ async def finish_workout_session(update: Update, user_id: int):
     if not start_time:
         await update.message.reply_text("Тренировка не была начата.", reply_markup=main_menu())
         return
-        
+
     duration = now_moscow() - start_time
     storage.user_states[user_id] = {
         "awaiting_confirmation": True,
@@ -342,7 +346,7 @@ async def handle_stat_period(update: Update, user_id: int, text: str, state: dic
         storage.user_states[user_id] = {"menu": "stat_category"}
         await update.message.reply_text("Выберите категорию:", reply_markup=stats_category_menu())
         return
-        
+
     now = now_moscow()
     if text == "📅 За день":
         period_start = now - timedelta(days=1)
@@ -370,7 +374,7 @@ async def handle_stat_period(update: Update, user_id: int, text: str, state: dic
 def format_statistics_message(sessions, period_start, now, title, cat):
     msg = (f"📊 *Статистика по {title}* за период с {period_start.strftime('%d.%m.%Y')} "
            f"по {now.strftime('%d.%m.%Y')}:\n🔢 Всего сессий: {len(sessions)}\n\n")
-    
+
     for s in sessions:
         time_str = s["time"].strftime("%d.%m %H:%M")
         note = s.get("note", "").strip()
@@ -386,7 +390,7 @@ def format_statistics_message(sessions, period_start, now, title, cat):
         else:
             entry += f"  💬 _Без заметки_"
         msg += entry + "\n\n"
-    
+
     return msg
 
 # ==================== ФОНОВЫЕ ЗАДАЧИ ====================
@@ -470,7 +474,6 @@ async def run_bot():
     asyncio.create_task(fitness_auto_finish_checker(app))
     asyncio.create_task(daily_report(app))
 
-    # Основной цикл
     try:
         await app.updater.start_polling()
         while True:
@@ -481,10 +484,14 @@ async def run_bot():
         await app.stop()
         await app.shutdown()
 
+# 🔥 ОСНОВНОЙ ЦИКЛ С ОБРАБОТКОЙ КОНФЛИКТА
 async def main():
     while True:
         try:
             await run_bot()
+        except Conflict as e:
+            logger.critical(f"❗ Конфликт: {e}. Остановка — другой экземпляр бота уже работает.")
+            break  # Критическая ошибка — не перезапускаем
         except Exception as e:
             logger.error(f"Ошибка: {e}. Перезапуск через 5 сек...")
             await asyncio.sleep(5)
