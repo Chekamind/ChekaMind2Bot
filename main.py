@@ -4,22 +4,17 @@ import random
 import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from aiohttp import web, ClientSession
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
 # ==================== КОНФИГУРАЦИЯ ====================
 BOT_TOKEN = "7276083736:AAGgMbHlOo5ccEvuUV-KXuJ0i2LQlgqEG_I"
-YC_API_KEY = os.getenv("YC_API_KEY")
-YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")
-YC_API_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
 # Настройки времени
 AUTO_FINISH_HOURS = 3
 AUTO_FINISH_CHECK_SECONDS = 300
 DAILY_REPORT_HOUR = 23
-PORT = int(os.getenv("PORT", 10000))
 
 # Настройки логирования
 logging.basicConfig(
@@ -31,10 +26,10 @@ logger = logging.getLogger(__name__)
 # ==================== ХРАНЕНИЕ ДАННЫХ ====================
 class DataStorage:
     def __init__(self):
-        self.mindfulness_sessions = {}   # user_id -> [{'time': dt, 'note': str}]
-        self.fitness_sessions = {}       # user_id -> [{'time': dt, 'note': str, 'duration_seconds': int}]
-        self.active_fitness_sessions = {}  # user_id -> datetime (Moscow)
-        self.user_states = {}            # user_id -> dict
+        self.mindfulness_sessions = {}
+        self.fitness_sessions = {}
+        self.active_fitness_sessions = {}
+        self.user_states = {}
 
 storage = DataStorage()
 
@@ -47,7 +42,6 @@ def main_menu():
         [KeyboardButton("💡 Задание"), KeyboardButton("📅 Рефлексия")],
         [KeyboardButton("✨ Я осознан!")],
         [KeyboardButton("⏱ Начать тренировку"), KeyboardButton("🏁 Закончить тренировку")],
-        [KeyboardButton("🧠 Поговорить с ИИ")],
         [KeyboardButton("📊 Статистика")]
     ])
 
@@ -74,9 +68,6 @@ def note_input_menu():
         [KeyboardButton("❌ Пропустить заметку"), KeyboardButton("🔄 Отменить")]
     ], one_time=True)
 
-def cancel_menu():
-    return create_keyboard([[KeyboardButton("❌ Отмена")]], one_time=True)
-
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def now_moscow() -> datetime:
     return datetime.now(MOSCOW_TZ)
@@ -90,51 +81,11 @@ def format_duration(seconds: int) -> str:
         return f"{minutes}м {seconds}с"
     return f"{seconds}с"
 
-async def get_ai_response(prompt: str) -> str:
-    if not YC_API_KEY or not YC_FOLDER_ID:
-        return "❌ ИИ не настроен. Обратитесь к разработчику."
-
-    system_message = (
-        "Ты — тёплый и мудрый наставник по осознанности, внимательности и внутреннему росту. "
-        "Отвечай кратко (1–3 предложения), с заботой, без оценок. "
-        "Говори как друг, который понимает. Используй мягкие метафоры и эмодзи, когда уместно."
-    )
-
-    payload = {
-        "modelUri": f"gpt://{YC_FOLDER_ID}/yandexgpt-lite/latest",
-        "completionOptions": {
-            "temperature": 0.6,
-            "maxTokens": 500
-        },
-        "messages": [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": prompt}
-        ]
-    }
-
-    headers = {
-        "Authorization": f"Api-Key {YC_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    try:
-        async with ClientSession() as session:
-            async with session.post(YC_API_URL, json=payload, headers=headers, timeout=15) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    logger.error("YandexGPT error %d: %s", resp.status, error_text)
-                    return "🧠 Извини, не могу подключиться к ИИ. Попробуй позже."
-                data = await resp.json()
-                return data["result"]["alternatives"][0]["message"]["content"].strip()
-    except Exception as e:
-        logger.error("YandexGPT request failed: %s", e)
-        return "🧠 Извини, произошла ошибка при общении с ИИ."
-
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     storage.user_states.pop(user.id, None)
-    
+
     if user.id in storage.active_fitness_sessions:
         start_time = storage.active_fitness_sessions[user.id]
         await update.message.reply_text(
@@ -158,20 +109,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     state = storage.user_states.get(user_id, {})
 
-    # Обработка состояний
-    if state.get("awaiting_ai"):
-        await handle_ai_response(update, user_id, text)
-        return
-        
     if state.get("awaiting_note"):
         await handle_note_input(update, user_id, text)
         return
-        
+
     if state.get("awaiting_confirmation"):
         await handle_note_confirmation(update, user_id, text)
         return
-        
-    # Основные команды
+
     if text == "💡 Задание":
         await send_random_task(update)
     elif text == "📅 Рефлексия":
@@ -182,8 +127,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_workout_session(update, user_id)
     elif text == "🏁 Закончить тренировку":
         await finish_workout_session(update, user_id)
-    elif text == "🧠 Поговорить с ИИ":
-        await start_ai_conversation(update, user_id)
     elif text == "📊 Статистика":
         await show_statistics_menu(update, user_id)
     elif text == "🔙 Назад":
@@ -192,40 +135,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_statistics_menus(update, user_id, text, state)
 
 # ==================== ОБРАБОТКА СОСТОЯНИЙ ====================
-async def handle_ai_response(update: Update, user_id: int, text: str):
-    if text == "❌ Отмена":
-        storage.user_states.pop(user_id, None)
-        await update.message.reply_text("Общение с ИИ отменено.", reply_markup=main_menu())
-        return
-        
-    await update.message.reply_text("🧠 Думаю...")
-    response = await get_ai_response(text)
-    storage.user_states.pop(user_id, None)
-    await update.message.reply_text(response, reply_markup=main_menu())
-
 async def handle_note_input(update: Update, user_id: int, text: str):
     state = storage.user_states[user_id]
     note = "Без заметки" if text in ["❌ Пропустить заметку", "🔄 Отменить"] else text
-    
+
     if state["session_type"] == "mindfulness":
         storage.mindfulness_sessions.setdefault(user_id, []).append({
             "time": state["session_time"],
             "note": note
         })
-    else:  # fitness
+    else:
         storage.fitness_sessions.setdefault(user_id, []).append({
             "time": state["session_time"],
             "note": note,
             "duration_seconds": int(state["duration"].total_seconds()) if state["duration"] else None
         })
-    
+
     storage.user_states.pop(user_id, None)
     message = f"✅ Заметка сохранена: «{note}»" if note != "Без заметки" else "Сессия сохранена без заметки."
     await update.message.reply_text(message, reply_markup=main_menu())
 
 async def handle_note_confirmation(update: Update, user_id: int, text: str):
     state = storage.user_states[user_id]
-    
+
     if text == "📝 Записать заметку":
         storage.user_states[user_id] = {
             "awaiting_note": True,
@@ -269,7 +201,7 @@ async def start_workout_session(update: Update, user_id: int):
     if user_id in storage.active_fitness_sessions:
         await update.message.reply_text("Тренировка уже запущена! Сначала завершите текущую.", reply_markup=main_menu())
         return
-        
+
     start_time = now_moscow()
     storage.active_fitness_sessions[user_id] = start_time
     storage.user_states[user_id] = {
@@ -288,7 +220,7 @@ async def finish_workout_session(update: Update, user_id: int):
     if not start_time:
         await update.message.reply_text("Тренировка не была начата.", reply_markup=main_menu())
         return
-        
+
     duration = now_moscow() - start_time
     storage.user_states[user_id] = {
         "awaiting_confirmation": True,
@@ -301,13 +233,6 @@ async def finish_workout_session(update: Update, user_id: int):
         f"⏱ Длительность: {str(duration).split('.')[0]}\n"
         "Хотите записать заметку?",
         reply_markup=note_confirmation_menu()
-    )
-
-async def start_ai_conversation(update: Update, user_id: int):
-    storage.user_states[user_id] = {"awaiting_ai": True}
-    await update.message.reply_text(
-        "💭 Напиши, что тебя волнует. Я постараюсь помочь с позиции осознанности.",
-        reply_markup=cancel_menu()
     )
 
 async def show_statistics_menu(update: Update, user_id: int):
@@ -342,7 +267,7 @@ async def handle_stat_period(update: Update, user_id: int, text: str, state: dic
         storage.user_states[user_id] = {"menu": "stat_category"}
         await update.message.reply_text("Выберите категорию:", reply_markup=stats_category_menu())
         return
-        
+
     now = now_moscow()
     if text == "📅 За день":
         period_start = now - timedelta(days=1)
@@ -370,7 +295,7 @@ async def handle_stat_period(update: Update, user_id: int, text: str, state: dic
 def format_statistics_message(sessions, period_start, now, title, cat):
     msg = (f"📊 *Статистика по {title}* за период с {period_start.strftime('%d.%m.%Y')} "
            f"по {now.strftime('%d.%m.%Y')}:\n🔢 Всего сессий: {len(sessions)}\n\n")
-    
+
     for s in sessions:
         time_str = s["time"].strftime("%d.%m %H:%M")
         note = s.get("note", "").strip()
@@ -386,7 +311,7 @@ def format_statistics_message(sessions, period_start, now, title, cat):
         else:
             entry += f"  💬 _Без заметки_"
         msg += entry + "\n\n"
-    
+
     return msg
 
 # ==================== ФОНОВЫЕ ЗАДАЧИ ====================
@@ -440,53 +365,6 @@ async def daily_report(app):
                 except Exception as e:
                     logger.error(f"Ошибка отправки отчёта: {e}")
 
-# ==================== ВЕБ-СЕРВЕР ДЛЯ PING ====================
-async def handle_root(request):
-    return web.Response(text="🧘 Mindfulness Bot is alive!")
-
-async def handle_health(request):
-    return web.Response(text="OK", status=200)
-
-async def run_webserver():
-    app = web.Application()
-    app.add_routes([web.get("/", handle_root), web.get("/health", handle_health)])
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logger.info(f"🌐 Веб-сервер запущен на порту {PORT}")
-
 # ==================== ЗАПУСК БОТА ====================
 async def main():
-    # Создаем Application и добавляем обработчики
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # Запускаем веб-сервер
-    await run_webserver()
-
-    # Запускаем бота
-    async with application:
-        # Запускаем фоновые задачи
-        asyncio.create_task(fitness_auto_finish_checker(application))
-        asyncio.create_task(daily_report(application))
-        
-        # Запускаем бота
-        await application.start()
-        
-        # Бесконечный цикл
-        try:
-            while True:
-                await asyncio.sleep(3600)
-        except asyncio.CancelledError:
-            pass
-        finally:
-            await application.stop()
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Бот остановлен пользователем")
+    app
