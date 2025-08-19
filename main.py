@@ -24,12 +24,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[KeyboardButton("📌 Задание на сегодня")]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
-        "👋 Привет! Я твой бот для осознанности.
-
-"
-        "Я буду давать тебе задания утром и напоминать вечером.
-
-"
+ "👋 Привет! Я твой бот для осознанности. Сегодня я буду присылать тебе задания утром и вопросы для размышлений вечером!"
         "Используй кнопки ниже для управления.",
         reply_markup=reply_markup
     )
@@ -74,3 +69,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
