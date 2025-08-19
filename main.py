@@ -11,7 +11,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 # ==================== КОНФИГУРАЦИЯ ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError("Переменная окружения BOT_TOKEN не установлена")
+    raise RuntimeError("Требуется переменная окружения BOT_TOKEN")
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
@@ -35,7 +35,6 @@ def load_data():
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # Восстанавливаем datetime
                 for sessions in data.get("mindfulness_sessions", {}).values():
                     for s in sessions:
                         s["time"] = datetime.fromisoformat(s["time"])
@@ -461,16 +460,17 @@ async def main():
     logger.info("✅ Бот запущен и работает 24/7")
     await app.run_polling()
 
-# Запуск без asyncio.run() — для совместимости с Render
+# =============== ЗАПУСК ДЛЯ RENDER ===============
 if __name__ == "__main__":
     try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    try:
-        loop.run_until_complete(main())
+        asyncio.run(main())
+    except RuntimeError as e:
+        if "Event loop is already running" in str(e):
+            logger.info("Event loop уже запущен (Render). Используем существующий цикл.")
+            loop = asyncio.get_event_loop()
+            loop.create_task(main())
+        else:
+            raise
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем")
         save_data()
