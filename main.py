@@ -3,7 +3,6 @@ import logging
 import random
 import asyncio
 import json
-import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
@@ -29,9 +28,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Блокировка для thread-safe операций
-data_lock = threading.Lock()
-
 # ==================== ХРАНЕНИЕ ДАННЫХ ====================
 DATA_FILE = "bot_data.json"
 
@@ -40,7 +36,6 @@ def load_data():
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # Конвертируем строки обратно в datetime
                 for sessions in data.get("mindfulness_sessions", {}).values():
                     for s in sessions:
                         if isinstance(s["time"], str):
@@ -60,42 +55,39 @@ def load_data():
     }
 
 def save_data():
-    with data_lock:
-        def datetime_to_str(obj):
-            if isinstance(obj, datetime):
-                return obj.isoformat()
-            raise TypeError
+    def datetime_to_str(obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        raise TypeError
 
-        data = {
-            "mindfulness_sessions": {
-                str(k): [{"time": s["time"], "note": s["note"]} for s in v]
-                for k, v in storage.mindfulness_sessions.items()
-            },
-            "fitness_sessions": {
-                str(k): [
-                    {"time": s["time"], "note": s["note"], "duration_seconds": s["duration_seconds"]}
-                    for s in v
-                ]
-                for k, v in storage.fitness_sessions.items()
-            },
-            "active_fitness_sessions": {
-                str(k): v.isoformat() for k, v in storage.active_fitness_sessions.items()
-            },
-            "user_states": storage.user_states
-        }
-        try:
-            with open(DATA_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2, default=datetime_to_str)
-        except Exception as e:
-            logger.error(f"Ошибка сохранения данных: {e}")
+    data = {
+        "mindfulness_sessions": {
+            str(k): [{"time": s["time"], "note": s["note"]} for s in v]
+            for k, v in storage.mindfulness_sessions.items()
+        },
+        "fitness_sessions": {
+            str(k): [
+                {"time": s["time"], "note": s["note"], "duration_seconds": s["duration_seconds"]}
+                for s in v
+            ]
+            for k, v in storage.fitness_sessions.items()
+        },
+        "active_fitness_sessions": {
+            str(k): v.isoformat() for k, v in storage.active_fitness_sessions.items()
+        },
+        "user_states": storage.user_states
+    }
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=datetime_to_str)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения данных: {e}")
 
 class DataStorage:
     def __init__(self):
         raw = load_data()
         self.mindfulness_sessions = raw.get("mindfulness_sessions", {})
         self.fitness_sessions = raw.get("fitness_sessions", {})
-        
-        # Безопасная загрузка active_fitness_sessions
         self.active_fitness_sessions = {}
         active_sessions = raw.get("active_fitness_sessions", {})
         for k, v in active_sessions.items():
@@ -106,7 +98,6 @@ class DataStorage:
                     self.active_fitness_sessions[int(k)] = v
             except (ValueError, TypeError) as e:
                 logger.error(f"Ошибка конвертации времени для пользователя {k}: {e}")
-        
         self.user_states = raw.get("user_states", {})
 
 storage = DataStorage()
@@ -165,7 +156,6 @@ async def safe_send_message(bot, user_id: int, text: str, **kwargs):
         await bot.send_message(user_id, text, **kwargs)
     except Forbidden:
         logger.warning(f"Пользователь {user_id} заблокировал бота.")
-        # Не удаляем данные, только логируем
     except BadRequest as e:
         logger.error(f"Bad Request для {user_id}: {e}")
     except Exception as e:
@@ -190,7 +180,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Используй кнопки ниже, чтобы отмечать свою активность.",
             reply_markup=main_menu()
         )
-    save_data()
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
@@ -265,7 +254,6 @@ async def handle_note_confirmation(update: Update, user_id: int, text: str):
         await update.message.reply_text("Действие отменено.", reply_markup=main_menu())
     else:
         await update.message.reply_text("Пожалуйста, выберите действие.", reply_markup=note_confirmation_menu())
-    save_data()
 
 # ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 async def send_random_task(update: Update):
@@ -291,7 +279,6 @@ async def start_mindfulness_session(update: Update, user_id: int):
         "duration": None
     }
     await update.message.reply_text("Хотите записать заметку об осознанности?", reply_markup=note_confirmation_menu())
-    save_data()
 
 async def start_workout_session(update: Update, user_id: int):
     if user_id in storage.active_fitness_sessions:
@@ -310,7 +297,6 @@ async def start_workout_session(update: Update, user_id: int):
         f"✅ Тренировка начата в {start_time.strftime('%H:%M')}!",
         reply_markup=note_confirmation_menu()
     )
-    save_data()
 
 async def finish_workout_session(update: Update, user_id: int):
     start_time = storage.active_fitness_sessions.pop(user_id, None)
@@ -336,12 +322,10 @@ async def finish_workout_session(update: Update, user_id: int):
 async def show_statistics_menu(update: Update, user_id: int):
     storage.user_states[user_id] = {"menu": "stat_category"}
     await update.message.reply_text("Выберите категорию статистики:", reply_markup=stats_category_menu())
-    save_data()
 
 async def return_to_main_menu(update: Update, user_id: int):
     storage.user_states.pop(user_id, None)
     await update.message.reply_text("Главное меню:", reply_markup=main_menu())
-    save_data()
 
 # ==================== ОБРАБОТКА СТАТИСТИКИ ====================
 async def handle_statistics_menus(update: Update, user_id: int, text: str, state: dict):
@@ -361,13 +345,11 @@ async def handle_stat_category(update: Update, user_id: int, text: str):
         await update.message.reply_text("Выберите период:", reply_markup=stats_period_menu())
     else:
         await update.message.reply_text("Выберите из меню.", reply_markup=stats_category_menu())
-    save_data()
 
 async def handle_stat_period(update: Update, user_id: int, text: str, state: dict):
     if text == "🔙 Назад":
         storage.user_states[user_id] = {"menu": "stat_category"}
         await update.message.reply_text("Выберите категорию:", reply_markup=stats_category_menu())
-        save_data()
         return
 
     now = now_moscow()
@@ -387,8 +369,6 @@ async def handle_stat_period(update: Update, user_id: int, text: str, state: dic
     filtered = [s for s in user_sessions if s["time"] >= period_start]
     if not filtered:
         await update.message.reply_text(f"За выбранный период нет данных по {title}.", reply_markup=main_menu())
-        storage.user_states.pop(user_id, None)
-        save_data()
         return
 
     msg = format_statistics_message(filtered, period_start, now, title, cat)
@@ -433,20 +413,15 @@ async def fitness_auto_finish_checker():
                         "duration_seconds": duration
                     })
                     users_to_remove.append(user_id)
-                    
-                    # Получаем бота из глобального контекста
                     if 'app' in globals():
                         await safe_send_message(
                             globals()['app'].bot, user_id,
                             f"⏳ Тренировка автоматически завершена после {AUTO_FINISH_HOURS} часов"
                         )
-            
             for user_id in users_to_remove:
                 storage.active_fitness_sessions.pop(user_id, None)
-            
             if users_to_remove:
                 save_data()
-                
             await asyncio.sleep(AUTO_FINISH_CHECK_SECONDS)
         except Exception as e:
             logger.error(f"Ошибка в auto-finish: {e}")
@@ -459,8 +434,7 @@ async def daily_report():
             target = now.replace(hour=DAILY_REPORT_HOUR, minute=0, second=0, microsecond=0)
             if now >= target:
                 target += timedelta(days=1)
-            wait_seconds = (target - now).total_seconds()
-            await asyncio.sleep(wait_seconds)
+            await asyncio.sleep((target - now).total_seconds())
 
             today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
             for user_id_str in list(storage.mindfulness_sessions.keys()):
@@ -471,52 +445,48 @@ async def daily_report():
                                if s["time"] >= today_start]
                 total_duration = sum(s.get("duration_seconds", 0) for s in fitness_today)
 
-                if mindful_today or fitness_today and 'app' in globals():
-                    await safe_send_message(
-                        globals()['app'].bot, user_id,
-                        f"🌙 *Ежедневный отчёт*\n\n"
-                        f"✨ Осознанность: {mindful_today} раз\n"
-                        f"🏋️‍♂️ Тренировок: {len(fitness_today)}\n"
-                        f"⏱ Время тренировок: {format_duration(total_duration)}",
-                        parse_mode="Markdown"
-                    )
+                if mindful_today or fitness_today:
+                    if 'app' in globals():
+                        await safe_send_message(
+                            globals()['app'].bot, user_id,
+                            f"🌙 *Ежедневный отчёт*\n\n"
+                            f"✨ Осознанность: {mindful_today} раз\n"
+                            f"🏋️‍♂️ Тренировок: {len(fitness_today)}\n"
+                            f"⏱ Время тренировок: {format_duration(total_duration)}",
+                            parse_mode="Markdown"
+                        )
         except Exception as e:
             logger.error(f"Ошибка в ежедневном отчёте: {e}")
             await asyncio.sleep(60)
 
 # ==================== ЗАПУСК БОТА ====================
 async def main():
-    # Создаем приложение
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    # Сохраняем app в глобальной переменной для доступа из фоновых задач
-    globals()['app'] = app
+    globals()['app'] = app  # Доступ к боту из фоновых задач
 
-    # Добавляем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Запускаем фоновые задачи
     asyncio.create_task(fitness_auto_finish_checker())
     asyncio.create_task(daily_report())
 
     logger.info("✅ Бот запущен и работает 24/7")
-    
-    # Просто запускаем polling - он сам управляет event loop'ом
-    await app.run_polling(
-        drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES
-    )
+    await app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 # =============== ЗАПУСК ДЛЯ RENDER ===============
 if __name__ == "__main__":
-    # Простой запуск - asyncio.run сам управляет event loop'ом
     try:
-        logger.info("🚀 Запуск бота на Render...")
         asyncio.run(main())
+    except RuntimeError as e:
+        if "Event loop is already running" in str(e):
+            logger.info("Event loop уже запущен. Используем существующий.")
+            loop = asyncio.get_event_loop()
+            loop.create_task(main())
+        else:
+            raise
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем")
         save_data()
     except Exception as e:
-        logger.error(f"Критическая ошибка: {e}")
+        logger.error(f"Критическая ошибка: {e}", exc_info=True)
         save_data()
