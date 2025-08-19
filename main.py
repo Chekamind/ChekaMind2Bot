@@ -165,7 +165,6 @@ async def safe_send_message(bot, user_id: int, text: str, **kwargs):
         await bot.send_message(user_id, text, **kwargs)
     except Forbidden:
         logger.warning(f"Пользователь {user_id} заблокировал бота.")
-        # Не удаляем данные, только логируем
     except BadRequest as e:
         logger.error(f"Bad Request для {user_id}: {e}")
     except Exception as e:
@@ -453,10 +452,12 @@ async def daily_report(app):
     while True:
         try:
             now = now_moscow()
-            target = now.replace(hour=DAILY_REPORT_HOUR, minute=0, second=0, microsecond=0)
-            if now >= target:
-                target += timedelta(days=1)
-            wait_seconds = (target - now).total_seconds()
+            target_time = now.replace(hour=DAILY_REPORT_HOUR, minute=0, second=0, microsecond=0)
+            if now > target_time:
+                target_time += timedelta(days=1)
+            
+            wait_seconds = (target_time - now).total_seconds()
+            logger.info(f"Ожидание ежедневного отчета: {wait_seconds} секунд")
             await asyncio.sleep(wait_seconds)
 
             today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -482,7 +483,7 @@ async def daily_report(app):
             await asyncio.sleep(60)
 
 # ==================== ЗАПУСК БОТА ====================
-def main():
+async def main():
     # Создаем приложение
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -490,31 +491,24 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Запускаем фоновые задачи через app
-    app.job_queue.run_repeating(
-        lambda context: asyncio.create_task(fitness_auto_finish_checker(context.application)),
-        interval=AUTO_FINISH_CHECK_SECONDS,
-        first=10
-    )
-    
-    app.job_queue.run_daily(
-        lambda context: asyncio.create_task(daily_report(context.application)),
-        time=datetime.time(hour=DAILY_REPORT_HOUR, minute=0, tzinfo=MOSCOW_TZ)
-    )
+    # Запускаем фоновые задачи
+    asyncio.create_task(fitness_auto_finish_checker(app))
+    asyncio.create_task(daily_report(app))
 
     logger.info("✅ Бот запущен и работает 24/7")
     
-    # Запускаем polling (блокирующий вызов)
-    app.run_polling(
+    # Запускаем polling
+    await app.run_polling(
         drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES
     )
 
 # =============== ЗАПУСК ДЛЯ RENDER ===============
 if __name__ == "__main__":
+    # Для Render используем простой запуск
     try:
-        logger.info("🚀 Запуск бота на Render...")
-        main()
+        logger.info("🚀 Запуск бота как Background Worker на Render...")
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем")
         save_data()
