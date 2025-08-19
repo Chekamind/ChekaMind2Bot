@@ -4,6 +4,7 @@ import random
 import asyncio
 import json
 import threading
+import signal
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
@@ -187,7 +188,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await update.message.reply_text(
-            "Привет! Я бот для осознанности и тренировок. "
+            "Привет! Я бot для осознанности и тренировок. "
             "Используй кнопки ниже, чтобы отмечать свою активность.",
             reply_markup=main_menu()
         )
@@ -482,37 +483,53 @@ async def daily_report(app):
             logger.error(f"Ошибка в ежедневном отчёте: {e}")
             await asyncio.sleep(60)
 
-# ==================== ЗАПУСК БОТА ====================
+# ==================== КОРРЕКТНЫЙ ЗАПУСК И ОСТАНОВКА ====================
 async def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    # Создаем приложение
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Добавляем обработчики
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Фоновые задачи
-    asyncio.create_task(fitness_auto_finish_checker(app))
-    asyncio.create_task(daily_report(app))
+    # Запускаем фоновые задачи
+    fitness_task = asyncio.create_task(fitness_auto_finish_checker(application))
+    daily_task = asyncio.create_task(daily_report(application))
 
     logger.info("✅ Бот запущен и работает 24/7")
-    await app.run_polling(
-        drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES
-    )
+    
+    try:
+        # Запускаем polling
+        await application.run_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES
+        )
+    except asyncio.CancelledError:
+        logger.info("Получен сигнал остановки...")
+    finally:
+        # Корректно останавливаем фоновые задачи
+        fitness_task.cancel()
+        daily_task.cancel()
+        
+        # Ждем завершения задач
+        try:
+            await asyncio.gather(fitness_task, daily_task, return_exceptions=True)
+        except Exception as e:
+            logger.error(f"Ошибка при остановке задач: {e}")
+        
+        # Сохраняем данные
+        save_data()
+        logger.info("Данные сохранены, бот остановлен")
 
 # =============== ЗАПУСК ДЛЯ RENDER ===============
 if __name__ == "__main__":
-    # Создаем новый event loop (критически важно для Render)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
+    # Простой запуск для Render
     try:
-        logger.info("🚀 Запуск бота на Render с polling...")
-        loop.run_until_complete(main())
+        logger.info("🚀 Запуск бота на Render...")
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Бот остановлен пользователем")
         save_data()
     except Exception as e:
-        logger.error(f"Критическая ошибка при запуске: {e}")
+        logger.error(f"Критическая ошибка: {e}")
         save_data()
-    finally:
-        loop.close()
