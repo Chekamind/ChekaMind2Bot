@@ -1,4 +1,3 @@
-import os
 import logging
 import random
 import asyncio
@@ -11,12 +10,10 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 BOT_TOKEN = "7276083736:AAGgMbHlOo5ccEvuUV-KXuJ0i2LQlgqEG_I"
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
-# Настройки времени
 AUTO_FINISH_HOURS = 3
 AUTO_FINISH_CHECK_SECONDS = 300
 DAILY_REPORT_HOUR = 23
 
-# Настройки логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -68,7 +65,7 @@ def note_input_menu():
         [KeyboardButton("❌ Пропустить заметку"), KeyboardButton("🔄 Отменить")]
     ], one_time=True)
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ====================
 def now_moscow() -> datetime:
     return datetime.now(MOSCOW_TZ)
 
@@ -81,7 +78,7 @@ def format_duration(seconds: int) -> str:
         return f"{minutes}м {seconds}с"
     return f"{seconds}с"
 
-# ==================== ОБРАБОТЧИКИ КОМАНД ====================
+# ==================== КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     storage.user_states.pop(user.id, None)
@@ -134,7 +131,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await handle_statistics_menus(update, user_id, text, state)
 
-# ==================== ОБРАБОТКА СОСТОЯНИЙ ====================
+# ==================== СОСТОЯНИЯ ====================
 async def handle_note_input(update: Update, user_id: int, text: str):
     state = storage.user_states[user_id]
     note = "Без заметки" if text in ["❌ Пропустить заметку", "🔄 Отменить"] else text
@@ -172,7 +169,7 @@ async def handle_note_confirmation(update: Update, user_id: int, text: str):
     else:
         await update.message.reply_text("Пожалуйста, выберите действие.", reply_markup=note_confirmation_menu())
 
-# ==================== ОСНОВНЫЕ КОМАНДЫ ====================
+# ==================== ОСНОВНЫЕ ====================
 async def send_random_task(update: Update):
     tasks = [
         "Задача: остановись на 60 секунд и почувствуй тело.",
@@ -243,7 +240,7 @@ async def return_to_main_menu(update: Update, user_id: int):
     storage.user_states.pop(user_id, None)
     await update.message.reply_text("Главное меню:", reply_markup=main_menu())
 
-# ==================== ОБРАБОТКА СТАТИСТИКИ ====================
+# ==================== СТАТИСТИКА ====================
 async def handle_statistics_menus(update: Update, user_id: int, text: str, state: dict):
     if state.get("menu") == "stat_category":
         await handle_stat_category(update, user_id, text)
@@ -314,7 +311,7 @@ def format_statistics_message(sessions, period_start, now, title, cat):
 
     return msg
 
-# ==================== ФОНОВЫЕ ЗАДАЧИ ====================
+# ==================== ФОНОВЫЕ ====================
 async def fitness_auto_finish_checker(app):
     while True:
         now = now_moscow()
@@ -365,6 +362,11 @@ async def daily_report(app):
                 except Exception as e:
                     logger.error(f"Ошибка отправки отчёта: {e}")
 
-# ==================== ЗАПУСК БОТА ====================
+# ==================== ЗАПУСК ====================
 async def main():
-    app
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    asyncio.create
