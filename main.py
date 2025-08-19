@@ -4,7 +4,6 @@ import random
 import asyncio
 import json
 import threading
-import signal
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
@@ -16,7 +15,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Требуется переменная окружения BOT_TOKEN")
 
-PORT = int(os.environ.get("PORT", 8443))
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
 # Настройки времени
@@ -188,7 +186,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await update.message.reply_text(
-            "Привет! Я бot для осознанности и тренировок. "
+            "Привет! Я бот для осознанности и тренировок. "
             "Используй кнопки ниже, чтобы отмечать свою активность.",
             reply_markup=main_menu()
         )
@@ -421,7 +419,7 @@ def format_statistics_message(sessions, period_start, now, title, cat):
     return msg
 
 # ==================== ФОНОВЫЕ ЗАДАЧИ ====================
-async def fitness_auto_finish_checker(app):
+async def fitness_auto_finish_checker():
     while True:
         try:
             now = now_moscow()
@@ -435,10 +433,13 @@ async def fitness_auto_finish_checker(app):
                         "duration_seconds": duration
                     })
                     users_to_remove.append(user_id)
-                    await safe_send_message(
-                        app.bot, user_id,
-                        f"⏳ Тренировка автоматически завершена после {AUTO_FINISH_HOURS} часов"
-                    )
+                    
+                    # Получаем бота из глобального контекста
+                    if 'app' in globals():
+                        await safe_send_message(
+                            globals()['app'].bot, user_id,
+                            f"⏳ Тренировка автоматически завершена после {AUTO_FINISH_HOURS} часов"
+                        )
             
             for user_id in users_to_remove:
                 storage.active_fitness_sessions.pop(user_id, None)
@@ -451,7 +452,7 @@ async def fitness_auto_finish_checker(app):
             logger.error(f"Ошибка в auto-finish: {e}")
             await asyncio.sleep(10)
 
-async def daily_report(app):
+async def daily_report():
     while True:
         try:
             now = now_moscow()
@@ -470,9 +471,9 @@ async def daily_report(app):
                                if s["time"] >= today_start]
                 total_duration = sum(s.get("duration_seconds", 0) for s in fitness_today)
 
-                if mindful_today or fitness_today:
+                if mindful_today or fitness_today and 'app' in globals():
                     await safe_send_message(
-                        app.bot, user_id,
+                        globals()['app'].bot, user_id,
                         f"🌙 *Ежедневный отчёт*\n\n"
                         f"✨ Осознанность: {mindful_today} раз\n"
                         f"🏋️‍♂️ Тренировок: {len(fitness_today)}\n"
@@ -483,47 +484,33 @@ async def daily_report(app):
             logger.error(f"Ошибка в ежедневном отчёте: {e}")
             await asyncio.sleep(60)
 
-# ==================== КОРРЕКТНЫЙ ЗАПУСК И ОСТАНОВКА ====================
+# ==================== ЗАПУСК БОТА ====================
 async def main():
     # Создаем приложение
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    # Сохраняем app в глобальной переменной для доступа из фоновых задач
+    globals()['app'] = app
 
     # Добавляем обработчики
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Запускаем фоновые задачи
-    fitness_task = asyncio.create_task(fitness_auto_finish_checker(application))
-    daily_task = asyncio.create_task(daily_report(application))
+    asyncio.create_task(fitness_auto_finish_checker())
+    asyncio.create_task(daily_report())
 
     logger.info("✅ Бот запущен и работает 24/7")
     
-    try:
-        # Запускаем polling
-        await application.run_polling(
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES
-        )
-    except asyncio.CancelledError:
-        logger.info("Получен сигнал остановки...")
-    finally:
-        # Корректно останавливаем фоновые задачи
-        fitness_task.cancel()
-        daily_task.cancel()
-        
-        # Ждем завершения задач
-        try:
-            await asyncio.gather(fitness_task, daily_task, return_exceptions=True)
-        except Exception as e:
-            logger.error(f"Ошибка при остановке задач: {e}")
-        
-        # Сохраняем данные
-        save_data()
-        logger.info("Данные сохранены, бот остановлен")
+    # Просто запускаем polling - он сам управляет event loop'ом
+    await app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES
+    )
 
 # =============== ЗАПУСК ДЛЯ RENDER ===============
 if __name__ == "__main__":
-    # Простой запуск для Render
+    # Простой запуск - asyncio.run сам управляет event loop'ом
     try:
         logger.info("🚀 Запуск бота на Render...")
         asyncio.run(main())
