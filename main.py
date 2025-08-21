@@ -1,118 +1,61 @@
 import logging
-import sqlite3
-import threading
-from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
-    Updater,
+    Application,
     CommandHandler,
-    CallbackQueryHandler,
     MessageHandler,
-    filters,  # корректный импорт
+    filters,
+    ContextTypes,
 )
-from flask import Flask
-import random
 
-# 🔑 Токен бота
-TOKEN = "7276083736:AAGgMbHlOo5ccEvuUV-KXuJ0i2LQlgqEG_I"
+# Твой токен
+TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
 
-# 📦 Логирование
+# Логирование
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
-# 📊 База данных SQLite
-conn = sqlite3.connect("mindfulness.db", check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS stats (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    username TEXT,
-    comment TEXT,
-    timestamp TEXT
-)
-""")
-conn.commit()
 
-# 🧘 Советы по осознанности
-MINDFULNESS_TIPS = [
-    "Сделайте глубокий вдох и выдох, почувствуйте, как воздух наполняет лёгкие.",
-    "Остановитесь на секунду и почувствуйте опору под ногами.",
-    "Сосредоточьтесь на том, что видите прямо сейчас, без оценок.",
-    "Обратите внимание на дыхание — просто наблюдайте за вдохом и выдохом.",
-    "Сделайте паузу. Скажите себе: 'Я здесь. Я живу этим моментом'."
-]
+# Команда /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [["Задание на день", "Рефлексия"],
+                ["Помощь", "О боте"]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-# /start
-def start(update: Update, context):
-    keyboard = [
-        [InlineKeyboardButton("🧘 Осознанность", callback_data="mindfulness")],
-        [InlineKeyboardButton("📊 Статистика", callback_data="stats")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text("Привет! Выберите действие:", reply_markup=reply_markup)
+    await update.message.reply_text(
+        "Привет! 👋 Я твой бот для осознанности.\nВыбери действие:",
+        reply_markup=reply_markup
+    )
 
-# Обработка кнопок
-def button_handler(update: Update, context):
-    query = update.callback_query
-    query.answer()
-    if query.data == "mindfulness":
-        tip = random.choice(MINDFULNESS_TIPS)
-        context.user_data["awaiting_comment"] = True
-        query.message.reply_text(
-            f"🧘 Совет: {tip}\n\nНапишите свой комментарий (что почувствовали, заметили):"
-        )
-    elif query.data == "stats":
-        cursor.execute(
-            "SELECT COUNT(*), GROUP_CONCAT(comment, '\n- ') FROM stats WHERE user_id = ?",
-            (query.from_user.id,)
-        )
-        result = cursor.fetchone()
-        total = result[0]
-        comments = result[1] if result[1] else "Нет комментариев"
-        query.message.reply_text(
-            f"📊 Ваша статистика:\n\nКоличество осознанных моментов: {total}\n\nКомментарии:\n- {comments}"
-        )
 
-# Сохраняем комментарии
-def handle_message(update: Update, context):
-    if context.user_data.get("awaiting_comment"):
-        user = update.message.from_user
-        comment = update.message.text
-        cursor.execute(
-            "INSERT INTO stats (user_id, username, comment, timestamp) VALUES (?, ?, ?, ?)",
-            (user.id, user.username, comment, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        )
-        conn.commit()
-        context.user_data["awaiting_comment"] = False
-        update.message.reply_text("✅ Комментарий сохранён! Продолжайте практику 🙏")
+# Ответ на текстовые сообщения
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
 
-# Flask "пингер"
-app_flask = Flask(__name__)
-@app_flask.route("/")
-def home():
-    return "✅ Bot is alive!", 200
+    if text == "Задание на день":
+        await update.message.reply_text("📝 Вот твое задание на день: сделай паузу и подыши 3 минуты.")
+    elif text == "Рефлексия":
+        await update.message.reply_text("💭 Как прошел твой день? Напиши пару мыслей.")
+    elif text == "Помощь":
+        await update.message.reply_text("📌 Доступные команды: /start")
+    elif text == "О боте":
+        await update.message.reply_text("🤖 Бот помогает развивать осознанность каждый день.")
+    else:
+        await update.message.reply_text("Я тебя понял 😉 но пока не знаю, что ответить.")
 
-def run_flask():
-    app_flask.run(host="0.0.0.0", port=8080)
 
-# Основной запуск
+# Основная функция запуска
 def main():
-    # Flask в отдельном потоке
-    threading.Thread(target=run_flask, daemon=True).start()
+    app = Application.builder().token(TOKEN).build()
 
-    # Telegram polling
-    updater = Updater(TOKEN)  # use_context больше не нужен
-    dp = updater.dispatcher
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CallbackQueryHandler(button_handler))
-    dp.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logging.info("🤖 Бот запущен!")
-    updater.start_polling()
-    updater.idle()
+    app.run_polling()
+
 
 if __name__ == "__main__":
     main()
