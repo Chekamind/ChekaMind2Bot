@@ -1,12 +1,20 @@
+import os
+import asyncio
+import threading
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from flask import Flask
-import threading
-import asyncio
 
 TOKEN = "7276083736:AAGgMbHlOo5ccEvuUV-KXuJ0i2LQlgqEG_I"
 
-# ================== Бот ==================
+# Flask для проверки, что сервис жив
+flask_app = Flask(__name__)
+
+@flask_app.route("/")
+def index():
+    return "Bot is running ✅"
+
+# Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [KeyboardButton("🧘 Задание на осознанность")],
@@ -18,8 +26,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
+# Обработка текстов
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.lower()
+
     if "задание" in text:
         await update.message.reply_text("Вот тебе задание на сегодня: наблюдай за дыханием 5 минут 🧘")
     elif "рефлексия" in text:
@@ -34,15 +44,10 @@ async def run_bot():
     print("Бот запущен...")
     await app.run_polling()
 
-# ================== Flask-заглушка ==================
-flask_app = Flask(__name__)
-
-@flask_app.route("/")
-def home():
-    return "Bot is running!"
-
 if __name__ == "__main__":
     # Запускаем бота в отдельном потоке
     threading.Thread(target=lambda: asyncio.run(run_bot())).start()
-    # Запускаем Flask на порту 10000
-    flask_app.run(host="0.0.0.0", port=10000)
+    
+    # Запускаем Flask на порту, который видит Render
+    port = int(os.environ.get("PORT", 5000))
+    flask_app.run(host="0.0.0.0", port=port)
