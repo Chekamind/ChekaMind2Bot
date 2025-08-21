@@ -3,18 +3,25 @@ import sqlite3
 import threading
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    Updater,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    Filters,
+)
 from flask import Flask
-import asyncio
 
+# 🔑 Токен
 TOKEN = "7276083736:AAGgMbHlOo5ccEvuUV-KXuJ0i2LQlgqEG_I"
 
+# 📦 Логирование
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 
-# SQLite
+# 📊 База
 conn = sqlite3.connect("mindfulness.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("""
@@ -28,6 +35,7 @@ CREATE TABLE IF NOT EXISTS stats (
 """)
 conn.commit()
 
+# 🧘 Советы по осознанности
 MINDFULNESS_TIPS = [
     "Сделайте глубокий вдох и выдох, почувствуйте, как воздух наполняет лёгкие.",
     "Остановитесь на секунду и почувствуйте опору под ногами.",
@@ -37,23 +45,23 @@ MINDFULNESS_TIPS = [
 ]
 
 # /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def start(update: Update, context):
     keyboard = [
         [InlineKeyboardButton("🧘 Осознанность", callback_data="mindfulness")],
         [InlineKeyboardButton("📊 Статистика", callback_data="stats")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Привет! Выберите действие:", reply_markup=reply_markup)
+    update.message.reply_text("Привет! Выберите действие:", reply_markup=reply_markup)
 
 # Кнопки
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def button_handler(update: Update, context):
     query = update.callback_query
-    await query.answer()
+    query.answer()
     if query.data == "mindfulness":
         import random
         tip = random.choice(MINDFULNESS_TIPS)
         context.user_data["awaiting_comment"] = True
-        await query.message.reply_text(
+        query.message.reply_text(
             f"🧘 Совет: {tip}\n\nНапишите свой комментарий (что почувствовали, заметили):"
         )
     elif query.data == "stats":
@@ -64,12 +72,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = cursor.fetchone()
         total = result[0]
         comments = result[1] if result[1] else "Нет комментариев"
-        await query.message.reply_text(
+        query.message.reply_text(
             f"📊 Ваша статистика:\n\nКоличество осознанных моментов: {total}\n\nКомментарии:\n- {comments}"
         )
 
 # Сохраняем комментарии
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_message(update: Update, context):
     if context.user_data.get("awaiting_comment"):
         user = update.message.from_user
         comment = update.message.text
@@ -79,7 +87,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         conn.commit()
         context.user_data["awaiting_comment"] = False
-        await update.message.reply_text("✅ Комментарий сохранён! Продолжайте практику 🙏")
+        update.message.reply_text("✅ Комментарий сохранён! Продолжайте практику 🙏")
 
 # Flask "пингер"
 app_flask = Flask(__name__)
@@ -91,17 +99,20 @@ def run_flask():
     app_flask.run(host="0.0.0.0", port=8080)
 
 # Основной запуск
-async def run_bot():
-    # Telegram Application
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logging.info("🤖 Бот запущен!")
-    await app.run_polling()
-
-if __name__ == "__main__":
+def main():
     # Flask в отдельном потоке
     threading.Thread(target=run_flask, daemon=True).start()
-    # Telegram-бот в основном потоке
-    asyncio.run(run_bot())
+
+    # Telegram polling
+    updater = Updater(TOKEN, use_context=True)
+    dp = updater.dispatcher
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CallbackQueryHandler(button_handler))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+
+    logging.info("🤖 Бот запущен!")
+    updater.start_polling()
+    updater.idle()
+
+if __name__ == "__main__":
+    main()
