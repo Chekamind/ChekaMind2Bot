@@ -1,4 +1,3 @@
-try:
-    import imghdr
-except ImportError:
-    import imghdr_py as imghdr
+# imghdr.py – заглушка для совместимости с python-telegram-bot
+def what(file, h=None):
+    return None
