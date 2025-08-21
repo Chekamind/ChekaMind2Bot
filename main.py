@@ -1,8 +1,10 @@
 import logging
 import sqlite3
+import threading
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from flask import Flask
 
 # 🔑 Токен
 TOKEN = "7276083736:AAGgMbHlOo5ccEvuUV-KXuJ0i2LQlgqEG_I"
@@ -74,10 +76,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting_comment"] = False
         await update.message.reply_text("✅ Комментарий сохранён! Продолжайте практику 🙏")
 
+# 🚀 Flask "пингер"
+app_flask = Flask(__name__)
+
+@app_flask.route("/")
+def home():
+    return "✅ Bot is alive!", 200
+
+def run_flask():
+    app_flask.run(host="0.0.0.0", port=8080)
+
 # 📌 Основной запуск
 def main():
-    app = Application.builder().token(TOKEN).build()
+    # Запуск Flask в отдельном потоке
+    threading.Thread(target=run_flask).start()
 
+    # Запуск телеграм-бота
+    app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
