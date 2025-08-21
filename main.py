@@ -6,7 +6,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from flask import Flask
 
-# 🔑 Токен
+# 🔑 Токен бота
 TOKEN = "7276083736:AAGgMbHlOo5ccEvuUV-KXuJ0i2LQlgqEG_I"
 
 # 📦 Логирование
@@ -15,7 +15,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# 📊 База данных
+# 📊 База данных SQLite
 conn = sqlite3.connect("mindfulness.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("""
@@ -38,7 +38,7 @@ MINDFULNESS_TIPS = [
     "Сделайте паузу. Скажите себе: 'Я здесь. Я живу этим моментом'."
 ]
 
-# 📌 Команда /start
+# 📌 /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🧘 Осознанность", callback_data="mindfulness")],
@@ -95,10 +95,10 @@ def run_flask():
 
 # 📌 Основной запуск
 def main():
-    # Запуск Flask в отдельном потоке
+    # Flask в отдельном потоке
     threading.Thread(target=run_flask).start()
 
-    # Создаём телеграм-приложение
+    # Telegram Application
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
