@@ -1,6 +1,6 @@
 services:
-  - type: worker
-    name: chekamind-bot
+  - type: web
+    name: chekamind2bot
     env: python
     buildCommand: ""
     startCommand: "python main.py"
