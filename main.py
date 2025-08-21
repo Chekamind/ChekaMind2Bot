@@ -5,17 +5,16 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from flask import Flask
+import asyncio
 
-# 🔑 Токен бота
 TOKEN = "7276083736:AAGgMbHlOo5ccEvuUV-KXuJ0i2LQlgqEG_I"
 
-# 📦 Логирование
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 
-# 📊 База данных SQLite
+# SQLite
 conn = sqlite3.connect("mindfulness.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("""
@@ -29,7 +28,6 @@ CREATE TABLE IF NOT EXISTS stats (
 """)
 conn.commit()
 
-# 🧘 Советы по осознанности
 MINDFULNESS_TIPS = [
     "Сделайте глубокий вдох и выдох, почувствуйте, как воздух наполняет лёгкие.",
     "Остановитесь на секунду и почувствуйте опору под ногами.",
@@ -38,7 +36,7 @@ MINDFULNESS_TIPS = [
     "Сделайте паузу. Скажите себе: 'Я здесь. Я живу этим моментом'."
 ]
 
-# 📌 /start
+# /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🧘 Осознанность", callback_data="mindfulness")],
@@ -47,7 +45,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Привет! Выберите действие:", reply_markup=reply_markup)
 
-# 📌 Обработка кнопок
+# Кнопки
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -70,7 +68,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 Ваша статистика:\n\nКоличество осознанных моментов: {total}\n\nКомментарии:\n- {comments}"
         )
 
-# 📌 Сохраняем комментарии
+# Сохраняем комментарии
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("awaiting_comment"):
         user = update.message.from_user
@@ -83,9 +81,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting_comment"] = False
         await update.message.reply_text("✅ Комментарий сохранён! Продолжайте практику 🙏")
 
-# 🚀 Flask "пингер" для UptimeRobot
+# Flask "пингер"
 app_flask = Flask(__name__)
-
 @app_flask.route("/")
 def home():
     return "✅ Bot is alive!", 200
@@ -93,19 +90,18 @@ def home():
 def run_flask():
     app_flask.run(host="0.0.0.0", port=8080)
 
-# 📌 Основной запуск
-def main():
-    # Flask в отдельном потоке
-    threading.Thread(target=run_flask).start()
-
+# Основной запуск
+async def run_bot():
     # Telegram Application
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
     logging.info("🤖 Бот запущен!")
-    app.run_polling()
+    await app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    # Flask в отдельном потоке
+    threading.Thread(target=run_flask, daemon=True).start()
+    # Telegram-бот в основном потоке
+    asyncio.run(run_bot())
