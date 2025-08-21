@@ -1,0 +1,7 @@
+services:
+  - type: worker
+    name: chekamind-bot
+    env: python
+    buildCommand: ""
+    startCommand: "python main.py"
+    plan: free
